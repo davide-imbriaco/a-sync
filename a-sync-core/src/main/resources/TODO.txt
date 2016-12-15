@@ -1,0 +1,21 @@
+
+ - read peer addresses from cluster config
+ - update local index on push
+ - delta index
+ - index store version/discard unsupported versions
+ - rename all to anyplace-sync-client
+
+ - retry operation if first BEP connection fail/close
+ - multi folder mode (change folder at runtime, multi-folder index handler)
+
+ - use absolute path syntax "/path" in db/app
+ - canonicalize all path on db/app (uri/url?)
+
+ - block cache cleanup, block cache shutdown
+ - connection wrapper, return to pool on close
+
+FINAL TARGET
+
+ - connect to network, aquire index; browse index offline;
+ - pull files from network;
+ - push files to network;

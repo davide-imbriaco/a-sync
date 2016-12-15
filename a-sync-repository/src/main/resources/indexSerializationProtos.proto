@@ -1,0 +1,66 @@
+package it.anyplace.sync.core.repo.protos;
+
+message Index {
+   optional int64 version = 1;
+   optional int64 sequence = 2;
+   optional int64 last_update = 5;
+   repeated PeerIndexInfo peers  = 3;
+   repeated FileInfo files  = 4;
+   repeated FolderInfo folders = 6;
+}
+
+message PeerIndexInfo {
+   optional string device_id = 3;
+   optional string folder = 4;
+   optional uint64 id = 1;
+   optional int64 sequence = 2;
+}
+
+message FileInfo {
+   optional string       folder         = 12;
+   optional string       name           = 1;
+   optional FileInfoType type           = 2;
+   optional int64        size           = 3;
+   optional uint32       permissions    = 4;
+   optional int64        modified_s     = 5;
+   optional int32        modified_ns    = 11;
+   optional bool         deleted        = 6;
+   optional bool         invalid        = 7;
+   optional bool         no_permissions = 8;
+   optional Vector       version        = 9;
+   optional int64        sequence      = 10;
+   repeated BlockInfo Blocks = 16;
+}
+
+message FolderInfo {
+   optional string      folder = 1;
+   optional string      label = 2;
+}
+
+enum FileInfoType {
+    FILE              = 0;
+    DIRECTORY         = 1;
+    SYMLINK_FILE      = 2;
+    SYMLINK_DIRECTORY = 3;
+    SYMLINK_UNKNOWN   = 4;
+}
+
+message Blocks {
+    repeated BlockInfo blocks = 1;
+}
+
+message BlockInfo {
+  optional  int64 offset = 1;
+  optional  int32 size   = 2;
+  optional  bytes hash   = 3;
+}
+
+message Vector {
+    repeated Counter counters = 1;
+}
+
+message Counter {
+   optional uint64 id    = 1;
+   optional uint64 value = 2;
+}
+

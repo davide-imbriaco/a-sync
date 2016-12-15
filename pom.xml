@@ -1,0 +1,22 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 http://maven.apache.org/xsd/maven-4.0.0.xsd">
+    <modelVersion>4.0.0</modelVersion>
+    <groupId>it.anyplace.sync</groupId>
+    <artifactId>a-sync</artifactId>
+    <version>1.0</version>
+    <packaging>pom</packaging>
+    <modules>
+        <module>a-sync-parent</module>
+        <module>a-sync-core</module>
+        <module>a-sync-relay</module>
+        <module>a-sync-http-relay</module>
+        <module>a-sync-bep</module>
+        <module>a-sync-client</module>
+        <module>a-sync-http-relay-server</module>
+        <module>a-sync-repository</module>
+        <module>a-sync-discovery</module>
+    </modules>
+    <properties>
+        <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
+    </properties>
+</project>
