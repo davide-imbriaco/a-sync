@@ -1,0 +1,9 @@
+/a-sync-core/target/
+/a-sync-relay/target/
+/a-sync-http-relay/target/
+/a-sync-bep/target/
+/a-sync-repository/target/
+/a-sync-discovery/target/
+/a-sync-client/target/
+/a-sync-http-relay-server/target/
+/a-sync-parent/target/
