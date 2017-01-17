@@ -30,7 +30,7 @@ import org.apache.http.conn.ssl.SSLConnectionSocketFactory;
 import org.apache.http.conn.ssl.TrustSelfSignedStrategy;
 import com.google.common.collect.Iterables;
 import com.google.common.collect.Lists;
-import it.anyplace.sync.core.Configuration;
+import it.anyplace.sync.core.configuration.ConfigurationService;
 import it.anyplace.sync.core.beans.DeviceAddress;
 import it.anyplace.sync.discovery.utils.AddressRanker;
 import java.io.Closeable;
@@ -52,7 +52,7 @@ import org.slf4j.LoggerFactory;
 public class GlobalDiscoveryHandler implements Closeable {
 
     private final Logger logger = LoggerFactory.getLogger(getClass());
-    private final Configuration configuration;
+    private final ConfigurationService configuration;
     private final Gson gson = new Gson();
     private final LoadingCache<String, List<DeviceAddress>> cache = CacheBuilder.newBuilder()
         .expireAfterAccess(30, TimeUnit.MINUTES)
@@ -66,7 +66,7 @@ public class GlobalDiscoveryHandler implements Closeable {
     private List<String> serverList = null;
 
 //    private final ExecutorService executorService = Executors.newCachedThreadPool();
-    public GlobalDiscoveryHandler(Configuration configuration) {
+    public GlobalDiscoveryHandler(ConfigurationService configuration) {
         this.configuration = configuration;
     }
 

@@ -67,6 +67,10 @@ public class FolderStats extends FolderInfo {
         return "FolderStats{folder=" + getFolder() + ", fileCount=" + fileCount + ", dirCount=" + dirCount + ", size=" + size + ", lastUpdate=" + lastUpdate + '}';
     }
 
+    public Builder copyBuilder() {
+        return new Builder(fileCount, dirCount, size, getFolder(), getLabel());
+    }
+
     public static Builder newBuilder() {
         return new Builder();
     }
@@ -78,6 +82,14 @@ public class FolderStats extends FolderInfo {
         private String folder, label;
 
         private Builder() {
+        }
+
+        public Builder(long fileCount, long dirCount, long size, String folder, String label) {
+            this.fileCount = fileCount;
+            this.dirCount = dirCount;
+            this.size = size;
+            this.folder = folder;
+            this.label = label;
         }
 
         public long getFileCount() {

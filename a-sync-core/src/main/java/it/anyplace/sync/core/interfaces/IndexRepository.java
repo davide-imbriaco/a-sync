@@ -60,6 +60,10 @@ public interface IndexRepository {
 
     public List<FolderStats> findAllFolderStats();
 
+    public List<FileInfo> findFileInfoBySearchTerm(String query);
+
+    public long countFileInfoBySearchTerm(String query);
+
     public abstract class FolderStatsUpdatedEvent {
 
         public abstract List<FolderStats> getFolderStats();

@@ -3,8 +3,9 @@
     <modelVersion>4.0.0</modelVersion>
     <groupId>it.anyplace.sync</groupId>
     <artifactId>a-sync</artifactId>
-    <version>1.0</version>
+    <version>1.1</version>
     <packaging>pom</packaging>
+    
     <modules>
         <module>a-sync-parent</module>
         <module>a-sync-core</module>
@@ -15,8 +16,17 @@
         <module>a-sync-http-relay-server</module>
         <module>a-sync-repository</module>
         <module>a-sync-discovery</module>
+        <module>a-sync-webclient</module>
     </modules>
-    <properties>
-        <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
-    </properties>
+    
+    <build>
+        <plugins>
+            <plugin>
+                <artifactId>maven-deploy-plugin</artifactId>
+                <configuration>
+                    <skip>true</skip>
+                </configuration>
+            </plugin>
+        </plugins>
+    </build>
 </project>

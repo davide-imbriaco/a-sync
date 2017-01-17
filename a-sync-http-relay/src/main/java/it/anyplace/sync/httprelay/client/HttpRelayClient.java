@@ -20,7 +20,9 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import static com.google.common.base.Preconditions.checkArgument;
 import static com.google.common.base.Preconditions.checkNotNull;
-import it.anyplace.sync.core.Configuration;
+import it.anyplace.sync.core.configuration.ConfigurationService;
+import static com.google.common.base.Preconditions.checkArgument;
+import static com.google.common.base.Preconditions.checkNotNull;
 
 /**
  *
@@ -29,9 +31,9 @@ import it.anyplace.sync.core.Configuration;
 public class HttpRelayClient {
 
     private final Logger logger = LoggerFactory.getLogger(getClass());
-    private final Configuration configuration;
+    private final ConfigurationService configuration;
 
-    public HttpRelayClient(Configuration configuration) {
+    public HttpRelayClient(ConfigurationService configuration) {
         this.configuration = configuration;
     }
 

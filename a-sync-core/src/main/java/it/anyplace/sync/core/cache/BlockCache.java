@@ -13,7 +13,7 @@
  */
 package it.anyplace.sync.core.cache;
 
-import it.anyplace.sync.core.Configuration;
+import it.anyplace.sync.core.configuration.ConfigurationService;
 import javax.annotation.Nullable;
 import org.slf4j.LoggerFactory;
 
@@ -23,7 +23,7 @@ import org.slf4j.LoggerFactory;
  */
 public abstract class BlockCache {
 
-    public static BlockCache getBlockCache(Configuration configuration) {
+    public static BlockCache getBlockCache(ConfigurationService configuration) {
         if (configuration.getCache() != null) {
             try {
                 return new FileBlockCache(configuration.getCache());

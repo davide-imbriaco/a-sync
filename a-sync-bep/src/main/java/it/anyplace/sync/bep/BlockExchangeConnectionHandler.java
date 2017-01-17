@@ -18,7 +18,7 @@ import com.google.common.base.Function;
 import static com.google.common.base.MoreObjects.firstNonNull;
 import it.anyplace.sync.core.security.KeystoreHandler;
 import static com.google.common.base.Objects.equal;
-import it.anyplace.sync.core.Configuration;
+import it.anyplace.sync.core.configuration.ConfigurationService;
 import java.io.DataInputStream;
 import java.io.IOException;
 import java.net.Socket;
@@ -69,9 +69,13 @@ import java.util.Set;
 import it.anyplace.sync.core.beans.IndexInfo;
 import it.anyplace.sync.core.beans.FolderInfo;
 import it.anyplace.sync.httprelay.client.HttpRelayClient;
+import it.anyplace.sync.bep.beans.ClusterConfigFolderInfo;
 import static com.google.common.base.Preconditions.checkArgument;
 import static com.google.common.base.Preconditions.checkNotNull;
-import it.anyplace.sync.bep.beans.ClusterConfigFolderInfo;
+import it.anyplace.sync.core.beans.DeviceInfo;
+import it.anyplace.sync.core.events.DeviceAddressActiveEvent;
+import static com.google.common.base.Preconditions.checkArgument;
+import static com.google.common.base.Preconditions.checkNotNull;
 
 /*
  * To change this template, choose Tools | Templates
@@ -86,7 +90,7 @@ public class BlockExchangeConnectionHandler implements Closeable {
     private final static int MAGIC = 0x2EA7D90B;
 
     private final Logger logger = LoggerFactory.getLogger(getClass());
-    private final Configuration configuration;
+    private final ConfigurationService configuration;
 
     private final ExecutorService outExecutorService = Executors.newSingleThreadExecutor(),
         inExecutorService = Executors.newSingleThreadExecutor(),
@@ -103,7 +107,7 @@ public class BlockExchangeConnectionHandler implements Closeable {
     private IndexHandler indexHandler;
     private boolean isClosed = false, isConnected = false;
 
-    public BlockExchangeConnectionHandler(Configuration configuration, DeviceAddress deviceAddress) {
+    public BlockExchangeConnectionHandler(ConfigurationService configuration, DeviceAddress deviceAddress) {
         checkNotNull(configuration);
         this.configuration = configuration;
         this.address = deviceAddress;
@@ -139,7 +143,7 @@ public class BlockExchangeConnectionHandler implements Closeable {
         checkArgument(socket == null && !isConnected, "already connected!");
         logger.info("connecting to {}", address.getAddress());
 
-        KeystoreHandler keystoreHandler = new KeystoreHandler(configuration);
+        KeystoreHandler keystoreHandler = KeystoreHandler.newLoader().loadAndStore(configuration);
 
         try {
             switch (address.getType()) {
@@ -532,7 +536,7 @@ public class BlockExchangeConnectionHandler implements Closeable {
                                                     folderInfo = builder.setShared(true).build();
                                                     logger.info("folder shared from device = {} folder = {}", address.getDeviceId(), folderInfo);
                                                     if (!configuration.getFolderNames().contains(folderInfo.getFolder())) {
-                                                        configuration.addFolders(new FolderInfo(folderInfo.getFolder(), folderInfo.getLabel()));
+                                                        configuration.edit().addFolders(new FolderInfo(folderInfo.getFolder(), folderInfo.getLabel()));
                                                         logger.info("new folder shared = {}", folderInfo);
                                                         eventBus.post(new NewFolderSharedEvent() {
                                                             @Override
@@ -547,19 +551,21 @@ public class BlockExchangeConnectionHandler implements Closeable {
                                                     logger.info("folder not shared from device = {} folder = {}", address.getDeviceId(), folderInfo);
                                                 }
                                                 clusterConfigInfo.putFolderInfo(folderInfo);
-                                                configuration.addPeers(Iterables.filter(Iterables.transform(firstNonNull(folder.getDevicesList(), Collections.<Device>emptyList()), new Function<Device, String>() {
+                                                configuration.edit().addPeers(Iterables.filter(Iterables.transform(firstNonNull(folder.getDevicesList(), Collections.<Device>emptyList()), new Function<Device, DeviceInfo>() {
                                                     @Override
-                                                    public String apply(Device d) {
-                                                        return hashDataToDeviceIdString(d.getId().toByteArray());
+                                                    public DeviceInfo apply(Device device) {
+                                                        String deviceId = hashDataToDeviceIdString(device.getId().toByteArray()),
+                                                            name = device.hasName() ? device.getName() : null;
+                                                        return new DeviceInfo(deviceId, name);
                                                     }
-                                                }), new Predicate<String>() {
+                                                }), new Predicate<DeviceInfo>() {
                                                     @Override
-                                                    public boolean apply(String s) {
-                                                        return !equal(s, configuration.getDeviceId());
+                                                    public boolean apply(DeviceInfo s) {
+                                                        return !equal(s.getDeviceId(), configuration.getDeviceId());
                                                     }
                                                 }));
                                             }
-                                            configuration.storeConfiguration();
+                                            configuration.edit().persistLater();
                                             eventBus.post(new ClusterConfigMessageProcessedEvent(clusterConfig));
                                         }
                                         break;
@@ -590,7 +596,7 @@ public class BlockExchangeConnectionHandler implements Closeable {
         return getAddress().getDeviceId();
     }
 
-    public abstract class MessageReceivedEvent<E> {
+    public abstract class MessageReceivedEvent<E> implements DeviceAddressActiveEvent {
 
         private final E message;
 
@@ -605,6 +611,11 @@ public class BlockExchangeConnectionHandler implements Closeable {
 
         public BlockExchangeConnectionHandler getConnectionHandler() {
             return BlockExchangeConnectionHandler.this;
+        }
+
+        @Override
+        public DeviceAddress getDeviceAddress() {
+            return getConnectionHandler().getAddress();
         }
 
     }

@@ -13,7 +13,7 @@
  */
 package it.anyplace.sync.client;
 
-import it.anyplace.sync.core.Configuration;
+import it.anyplace.sync.core.configuration.ConfigurationService;
 import static com.google.common.base.Objects.equal;
 import com.google.common.collect.Lists;
 import it.anyplace.sync.core.beans.DeviceAddress;
@@ -42,10 +42,11 @@ import org.apache.commons.lang3.tuple.Pair;
 import it.anyplace.sync.core.beans.FolderInfo;
 import it.anyplace.sync.repository.repo.SqlRepository;
 import it.anyplace.sync.discovery.DiscoveryHandler;
-import static com.google.common.base.Preconditions.checkNotNull;
 import com.google.common.collect.Sets;
 import it.anyplace.sync.discovery.DeviceAddressSupplier;
 import java.util.Set;
+import it.anyplace.sync.devices.DevicesHandler;
+import static com.google.common.base.Preconditions.checkNotNull;
 
 /**
  *
@@ -54,26 +55,32 @@ import java.util.Set;
 public class SyncthingClient implements Closeable {
 
     private final Logger logger = LoggerFactory.getLogger(getClass());
-    private final Configuration configuration;
+    private final ConfigurationService configuration;
     private final DiscoveryHandler discoveryHandler;
     private final SqlRepository sqlRepository;
     private final IndexHandler indexHandler;
     private final List<BlockExchangeConnectionHandler> connections = Collections.synchronizedList(Lists.<BlockExchangeConnectionHandler>newArrayList());
     private final List<BlockExchangeConnectionHandler> pool = Lists.<BlockExchangeConnectionHandler>newArrayList();
+    private final DevicesHandler devicesHandler;
 
-    public SyncthingClient(Configuration configuration) {
+    public SyncthingClient(ConfigurationService configuration) {
         this.configuration = configuration;
         this.sqlRepository = new SqlRepository(configuration);
         indexHandler = new IndexHandler(configuration, sqlRepository);
         discoveryHandler = new DiscoveryHandler(configuration, sqlRepository);
+        devicesHandler = new DevicesHandler(configuration);
+        discoveryHandler.getEventBus().register(devicesHandler);
     }
 
     public void clearCacheAndIndex() {
         logger.info("clear cache");
         indexHandler.clearIndex();
-        configuration.setFolders(Collections.<FolderInfo>emptyList());
-        configuration.storeConfiguration();
+        configuration.edit().setFolders(Collections.<FolderInfo>emptyList()).persistLater();
         BlockCache.getBlockCache(configuration).clear();
+    }
+
+    public DevicesHandler getDevicesHandler() {
+        return devicesHandler;
     }
 
     private @Nullable
@@ -110,6 +117,7 @@ public class SyncthingClient implements Closeable {
         final BlockExchangeConnectionHandler connectionHandler = new BlockExchangeConnectionHandler(configuration, deviceAddress);
         connectionHandler.setIndexHandler(indexHandler);
         connectionHandler.getEventBus().register(indexHandler);
+        connectionHandler.getEventBus().register(devicesHandler);
         final AtomicBoolean shouldRestartForNewFolder = new AtomicBoolean(false);
         connectionHandler.getEventBus().register(new Object() {
             @Subscribe
@@ -165,13 +173,13 @@ public class SyncthingClient implements Closeable {
 //    public List<DeviceAddress> getPeerAddressesRanked() {
 //        logger.debug("retrieving all peer addresses");
 //        List<DeviceAddress> list = Lists.newArrayList();
-//        for (String deviceId : configuration.getPeers()) {
+//        for (String deviceId : configuration.getPeerIds()) {
 //            list.addAll(globalDiscoveryHandler.query(deviceId));
 //        }
 //        Iterables.addAll(list, Iterables.filter(localDiscorveryHandler.waitForAddresses().getDeviceAddresses(), new Predicate<DeviceAddress>() {
 //            @Override
 //            public boolean apply(DeviceAddress a) {
-//                return configuration.getPeers().contains(a.getDeviceId());
+//                return configuration.getPeerIds().contains(a.getDeviceId());
 //            }
 //        }));
 //        list = AddressRanker.testAndRank(list);
@@ -287,7 +295,7 @@ public class SyncthingClient implements Closeable {
 
     public DiscoveryHandler getDiscoveryHandler() {
         return discoveryHandler;
-    }  
+    }
 
     public IndexHandler getIndexHandler() {
         return indexHandler;
@@ -295,6 +303,7 @@ public class SyncthingClient implements Closeable {
 
     @Override
     public void close() {
+        devicesHandler.close();
         discoveryHandler.close();
         for (BlockExchangeConnectionHandler connectionHandler : Lists.newArrayList(connections)) {
             connectionHandler.close();

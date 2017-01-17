@@ -36,7 +36,7 @@ import com.google.common.collect.Multimap;
 import com.google.common.collect.Iterables;
 import com.google.common.collect.Lists;
 import com.google.common.eventbus.Subscribe;
-import it.anyplace.sync.core.Configuration;
+import it.anyplace.sync.core.configuration.ConfigurationService;
 import it.anyplace.sync.discovery.protocol.ld.protos.LocalDiscoveryProtos.Announce;
 import java.io.ByteArrayOutputStream;
 import java.io.DataOutputStream;
@@ -51,8 +51,10 @@ import static it.anyplace.sync.core.security.KeystoreHandler.deviceIdStringToHas
 import static it.anyplace.sync.core.security.KeystoreHandler.hashDataToDeviceIdString;
 import java.util.concurrent.Callable;
 import java.util.concurrent.Future;
-import static com.google.common.base.Preconditions.checkArgument;
 import java.io.Closeable;
+import static com.google.common.base.Preconditions.checkArgument;
+import it.anyplace.sync.core.events.DeviceAddressReceivedEvent;
+import static com.google.common.base.Preconditions.checkArgument;
 
 /**
  *
@@ -68,9 +70,9 @@ public class LocalDiscorveryHandler implements Closeable {
     private final ExecutorService processingExecutorService = Executors.newCachedThreadPool();
     private final EventBus eventBus = new AsyncEventBus(processingExecutorService);
     private final Multimap<String, DeviceAddress> localDiscoveryRecords = HashMultimap.create();
-    private final Configuration configuration;
+    private final ConfigurationService configuration;
 
-    public LocalDiscorveryHandler(Configuration configuration) {
+    public LocalDiscorveryHandler(ConfigurationService configuration) {
         this.configuration = configuration;
     }
 
@@ -274,8 +276,9 @@ public class LocalDiscorveryHandler implements Closeable {
         return this;
     }
 
-    public abstract class MessageReceivedEvent {
+    public abstract class MessageReceivedEvent implements DeviceAddressReceivedEvent {
 
+        @Override
         public abstract List<DeviceAddress> getDeviceAddresses();
 
         public abstract String getDeviceId();

@@ -21,7 +21,7 @@ import com.google.common.collect.Lists;
 import com.google.common.io.BaseEncoding;
 import com.google.protobuf.ByteString;
 import com.google.protobuf.InvalidProtocolBufferException;
-import it.anyplace.sync.core.Configuration;
+import it.anyplace.sync.core.configuration.ConfigurationService;
 import it.anyplace.sync.core.beans.BlockInfo;
 import it.anyplace.sync.core.beans.FileInfo;
 import it.anyplace.sync.core.beans.FileInfo.FileType;
@@ -46,25 +46,21 @@ import com.google.common.cache.CacheLoader;
 import com.google.common.cache.LoadingCache;
 import it.anyplace.sync.core.beans.FolderStats;
 import static com.google.common.base.Strings.nullToEmpty;
-import com.google.common.collect.Maps;
 import com.google.common.eventbus.EventBus;
 import com.zaxxer.hikari.HikariConfig;
 import com.zaxxer.hikari.HikariDataSource;
 import it.anyplace.sync.repository.repo.protos.IndexSerializationProtos;
 import it.anyplace.sync.core.beans.FileBlocks;
 import static it.anyplace.sync.core.beans.FileInfo.checkBlocks;
-import it.anyplace.sync.core.utils.ExecutorUtils;
 import java.io.Closeable;
-import java.util.Map;
-import java.util.concurrent.Executors;
-import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
 import org.apache.commons.lang3.tuple.Pair;
-import static com.google.common.base.Preconditions.checkArgument;
 import it.anyplace.sync.core.beans.DeviceAddress;
 import it.anyplace.sync.core.interfaces.DeviceAddressRepository;
 import it.anyplace.sync.core.interfaces.IndexRepository;
 import it.anyplace.sync.core.interfaces.IndexRepository.FolderStatsUpdatedEvent;
+import static com.google.common.base.Preconditions.checkArgument;
+import static org.apache.http.util.TextUtils.isBlank;
 
 /**
  *
@@ -73,23 +69,40 @@ import it.anyplace.sync.core.interfaces.IndexRepository.FolderStatsUpdatedEvent;
 public class SqlRepository implements Closeable, IndexRepository, DeviceAddressRepository {
 
     private final Logger logger = LoggerFactory.getLogger(getClass());
-    private final Configuration configuration;
-    private final static int VERSION = 11;
+    private final ConfigurationService configuration;
+    private final static int VERSION = 12;
     private Sequencer sequencer = new IndexRepoSequencer();
     private final String jdbcUrl;
     private final HikariConfig hikariConfig;
-    private HikariDataSource dataSource;
-    private final ScheduledExecutorService scheduledExecutorService = Executors.newSingleThreadScheduledExecutor();
-    private boolean folderStatsDirty = true;
+    private final HikariDataSource dataSource;
+//    private final ScheduledExecutorService scheduledExecutorService = Executors.newSingleThreadScheduledExecutor();
     private final EventBus eventBus = new EventBus();
+    private final LoadingCache<Pair<String, String>, Optional<IndexInfo>> indexInfoByDeviceIdAndFolder = CacheBuilder.
+        newBuilder().expireAfterAccess(1, TimeUnit.DAYS)
+        .build(new CacheLoader<Pair<String, String>, Optional<IndexInfo>>() {
+            @Override
+            public Optional<IndexInfo> load(Pair<String, String> key) throws Exception {
+                return Optional.fromNullable(doFindIndexInfoByDeviceAndFolder(key.getLeft(), key.getRight()));
+            }
 
-    public SqlRepository(Configuration configuration) {
+        });
+    private final LoadingCache<String, Optional<FolderStats>> folderStatsByFolder = CacheBuilder.
+        newBuilder().expireAfterAccess(1, TimeUnit.DAYS)
+        .build(new CacheLoader<String, Optional<FolderStats>>() {
+            @Override
+            public Optional<FolderStats> load(String key) throws Exception {
+                return Optional.fromNullable(doFindFolderStats(key));
+            }
+
+        });
+
+    public SqlRepository(ConfigurationService configuration) {
         this.configuration = configuration;
         logger.info("starting sql database");
         File dbDir = new File(configuration.getDatabase(), "index");
         dbDir.mkdirs();
         checkArgument(dbDir.isDirectory() && dbDir.canWrite());
-        jdbcUrl = "jdbc:h2:file:" + dbDir.getAbsolutePath() + nullToEmpty(configuration.getProperty("repository.h2.dboptions"));
+        jdbcUrl = "jdbc:h2:file:" + dbDir.getAbsolutePath() + nullToEmpty(configuration.getRepositoryH2Config());
         logger.debug("jdbc url = {}", jdbcUrl);
         hikariConfig = new HikariConfig();
         hikariConfig.setDriverClassName("org.h2.Driver");
@@ -97,24 +110,25 @@ public class SqlRepository implements Closeable, IndexRepository, DeviceAddressR
         hikariConfig.setMinimumIdle(4);
         dataSource = new HikariDataSource(hikariConfig);
         checkDb();
-        scheduledExecutorService.submit(new Runnable() {
-            @Override
-            public void run() {
-                Thread.currentThread().setPriority(Thread.MIN_PRIORITY);
-            }
-        });
-        scheduledExecutorService.scheduleWithFixedDelay(new Runnable() {
-            @Override
-            public void run() {
-                if (folderStatsDirty) {
-                    folderStatsDirty = false;
-                    updateFolderStats();
-                }
-            }
-        }, 15, 30, TimeUnit.SECONDS);
+//        scheduledExecutorService.submit(new Runnable() {
+//            @Override
+//            public void run() {
+//                Thread.currentThread().setPriority(Thread.MIN_PRIORITY);
+//            }
+//        });
+//        scheduledExecutorService.scheduleWithFixedDelay(new Runnable() {
+//            @Override
+//            public void run() {
+//                if (folderStatsDirty) {
+//                    folderStatsDirty = false;
+//                    updateFolderStats();
+//                }
+//            }
+//        }, 15, 30, TimeUnit.SECONDS);
         logger.debug("database ready");
     }
 
+    @Override
     public EventBus getEventBus() {
         return eventBus;
     }
@@ -232,21 +246,12 @@ public class SqlRepository implements Closeable, IndexRepository, DeviceAddressR
         logger.info("database initialized");
     }
 
+    @Override
     public Sequencer getSequencer() {
         return sequencer;
     }
 
     //INDEX INFO
-    private final LoadingCache<Pair<String, String>, Optional<IndexInfo>> indexInfoByDeviceIdAndFolder = CacheBuilder.
-        newBuilder().expireAfterAccess(1, TimeUnit.DAYS)
-        .build(new CacheLoader<Pair<String, String>, Optional<IndexInfo>>() {
-            @Override
-            public Optional<IndexInfo> load(Pair<String, String> key) throws Exception {
-                return Optional.fromNullable(doFindIndexInfoByDeviceAndFolder(key.getLeft(), key.getRight()));
-            }
-
-        });
-
     private IndexInfo readFolderIndexInfo(ResultSet resultSet) throws SQLException {
         return IndexInfo.newBuilder()
             .setFolder(resultSet.getString("folder"))
@@ -257,6 +262,7 @@ public class SqlRepository implements Closeable, IndexRepository, DeviceAddressR
             .build();
     }
 
+    @Override
     public void updateIndexInfo(IndexInfo indexInfo) {
         try (Connection connection = getConnection()) {
             try (PreparedStatement prepareStatement = connection.prepareStatement("MERGE INTO folder_index_info"
@@ -276,6 +282,7 @@ public class SqlRepository implements Closeable, IndexRepository, DeviceAddressR
     }
 
     public @Nullable
+    @Override
     IndexInfo findIndexInfoByDeviceAndFolder(String deviceId, String folder) {
         return indexInfoByDeviceIdAndFolder.getUnchecked(Pair.of(deviceId, folder)).orNull();
     }
@@ -298,6 +305,7 @@ public class SqlRepository implements Closeable, IndexRepository, DeviceAddressR
 
     // FILE INFO
     public @Nullable
+    @Override
     FileInfo findFileInfo(String folder, String path) {
         try (Connection connection = getConnection(); PreparedStatement prepareStatement = connection.prepareStatement("SELECT * FROM file_info WHERE folder=? AND path=?")) {
             prepareStatement.setString(1, folder);
@@ -314,6 +322,7 @@ public class SqlRepository implements Closeable, IndexRepository, DeviceAddressR
     }
 
     public @Nullable
+    @Override
     Date findFileInfoLastModified(String folder, String path) {
         try (Connection connection = getConnection(); PreparedStatement prepareStatement = connection.prepareStatement("SELECT last_modified FROM file_info WHERE folder=? AND path=?")) {
             prepareStatement.setString(1, folder);
@@ -330,6 +339,7 @@ public class SqlRepository implements Closeable, IndexRepository, DeviceAddressR
     }
 
     public @Nullable
+    @Override
     FileInfo findNotDeletedFileInfo(String folder, String path) {
         try (Connection connection = getConnection(); PreparedStatement prepareStatement = connection.prepareStatement("SELECT * FROM file_info WHERE folder=? AND path=? AND is_deleted=FALSE")) {
             prepareStatement.setString(1, folder);
@@ -366,6 +376,7 @@ public class SqlRepository implements Closeable, IndexRepository, DeviceAddressR
     }
 
     public @Nullable
+    @Override
     FileBlocks findFileBlocks(String folder, String path) {
         try (Connection connection = getConnection(); PreparedStatement prepareStatement = connection.prepareStatement("SELECT * FROM file_blocks WHERE folder=? AND path=?")) {
             prepareStatement.setString(1, folder);
@@ -392,21 +403,23 @@ public class SqlRepository implements Closeable, IndexRepository, DeviceAddressR
         return new FileBlocks(resultSet.getString("folder"), resultSet.getString("path"), blockList);
     }
 
-    public void updateFileInfo(FileInfo fileInfo, @Nullable FileBlocks fileBlocks) {
-        Version version = Iterables.getLast(fileInfo.getVersionList());
+    @Override
+    public void updateFileInfo(FileInfo newFileInfo, @Nullable FileBlocks newFileBlocks) {
+        final FolderStats folderStats;
+        Version version = Iterables.getLast(newFileInfo.getVersionList());
         //TODO open transsaction, rollback
         try (Connection connection = getConnection()) {
-            if (fileBlocks != null) {
-                checkBlocks(fileInfo, fileBlocks);
+            if (newFileBlocks != null) {
+                checkBlocks(newFileInfo, newFileBlocks);
                 try (PreparedStatement prepareStatement = connection.prepareStatement("MERGE INTO file_blocks"
                     + " (folder,path,hash,size,blocks)"
                     + " VALUES (?,?,?,?,?)")) {
-                    prepareStatement.setString(1, fileBlocks.getFolder());
-                    prepareStatement.setString(2, fileBlocks.getPath());
-                    prepareStatement.setString(3, fileBlocks.getHash());
-                    prepareStatement.setLong(4, fileBlocks.getSize());
+                    prepareStatement.setString(1, newFileBlocks.getFolder());
+                    prepareStatement.setString(2, newFileBlocks.getPath());
+                    prepareStatement.setString(3, newFileBlocks.getHash());
+                    prepareStatement.setLong(4, newFileBlocks.getSize());
                     prepareStatement.setBytes(5, IndexSerializationProtos.Blocks.newBuilder()
-                        .addAllBlocks(Iterables.transform(fileBlocks.getBlocks(), new Function<BlockInfo, IndexSerializationProtos.BlockInfo>() {
+                        .addAllBlocks(Iterables.transform(newFileBlocks.getBlocks(), new Function<BlockInfo, IndexSerializationProtos.BlockInfo>() {
                             @Override
                             public IndexSerializationProtos.BlockInfo apply(BlockInfo input) {
                                 return IndexSerializationProtos.BlockInfo.newBuilder()
@@ -419,33 +432,68 @@ public class SqlRepository implements Closeable, IndexRepository, DeviceAddressR
                     prepareStatement.executeUpdate();
                 }
             }
+            FileInfo oldFileInfo = findFileInfo(newFileInfo.getFolder(), newFileInfo.getPath());
             try (PreparedStatement prepareStatement = connection.prepareStatement("MERGE INTO file_info"
                 + " (folder,path,file_name,parent,size,hash,last_modified,file_type,version_id,version_value,is_deleted)"
                 + " VALUES (?,?,?,?,?,?,?,?,?,?,?)")) {
-                prepareStatement.setString(1, fileInfo.getFolder());
-                prepareStatement.setString(2, fileInfo.getPath());
-                prepareStatement.setString(3, fileInfo.getFileName());
-                prepareStatement.setString(4, fileInfo.getParent());
-                prepareStatement.setLong(7, fileInfo.getLastModified().getTime());
-                prepareStatement.setString(8, fileInfo.getType().name());
+                prepareStatement.setString(1, newFileInfo.getFolder());
+                prepareStatement.setString(2, newFileInfo.getPath());
+                prepareStatement.setString(3, newFileInfo.getFileName());
+                prepareStatement.setString(4, newFileInfo.getParent());
+                prepareStatement.setLong(7, newFileInfo.getLastModified().getTime());
+                prepareStatement.setString(8, newFileInfo.getType().name());
                 prepareStatement.setLong(9, version.getId());
                 prepareStatement.setLong(10, version.getValue());
-                prepareStatement.setBoolean(11, fileInfo.isDeleted());
-                if (fileInfo.isDirectory()) {
+                prepareStatement.setBoolean(11, newFileInfo.isDeleted());
+                if (newFileInfo.isDirectory()) {
                     prepareStatement.setNull(5, Types.BIGINT);
                     prepareStatement.setNull(6, Types.VARCHAR);
                 } else {
-                    prepareStatement.setLong(5, fileInfo.getSize());
-                    prepareStatement.setString(6, fileInfo.getHash());
+                    prepareStatement.setLong(5, newFileInfo.getSize());
+                    prepareStatement.setString(6, newFileInfo.getHash());
                 }
                 prepareStatement.executeUpdate();
             }
-            folderStatsDirty = true;
+            //update stats
+            long deltaFileCount = 0, deltaDirCount = 0, deltaSize = 0;
+            boolean oldMissing = oldFileInfo == null || oldFileInfo.isDeleted();
+            boolean newMissing = newFileInfo.isDeleted();
+            boolean oldSizeMissing = oldMissing || !oldFileInfo.isFile();
+            boolean newSizeMissing = newMissing || !newFileInfo.isFile();
+            if (!oldSizeMissing) {
+                deltaSize -= oldFileInfo.getSize();
+            }
+            if (!newSizeMissing) {
+                deltaSize += newFileInfo.getSize();
+            }
+            if (!oldMissing) {
+                if (oldFileInfo.isFile()) {
+                    deltaFileCount--;
+                } else if (oldFileInfo.isDirectory()) {
+                    deltaDirCount--;
+                }
+            }
+            if (!newMissing) {
+                if (newFileInfo.isFile()) {
+                    deltaFileCount++;
+                } else if (newFileInfo.isDirectory()) {
+                    deltaDirCount++;
+                }
+            }
+            folderStats = updateFolderStats(connection, newFileInfo.getFolder(), deltaFileCount, deltaDirCount, deltaSize, newFileInfo.getLastModified());
         } catch (SQLException ex) {
             throw new RuntimeException(ex);
         }
+        folderStatsByFolder.put(folderStats.getFolder(), Optional.of(folderStats));
+        eventBus.post(new FolderStatsUpdatedEvent() {
+            @Override
+            public List<FolderStats> getFolderStats() {
+                return Collections.singletonList(folderStats);
+            }
+        });
     }
 
+    @Override
     public List<FileInfo> findNotDeletedFilesByFolderAndParent(String folder, String parentPath) {
         List<FileInfo> list = Lists.newArrayList();
         try (Connection connection = getConnection(); PreparedStatement prepareStatement = connection.prepareStatement("SELECT * FROM file_info WHERE folder=? AND parent=? AND is_deleted=FALSE")) {
@@ -461,12 +509,48 @@ public class SqlRepository implements Closeable, IndexRepository, DeviceAddressR
         return list;
     }
 
+    @Override
+    public List<FileInfo> findFileInfoBySearchTerm(String query) {
+        checkArgument(!isBlank(query));
+//        checkArgument(maxResult > 0);
+        List<FileInfo> list = Lists.newArrayList();
+//        try (Connection connection = getConnection(); PreparedStatement preparedStatement = connection.prepareStatement("SELECT * FROM file_info WHERE LOWER(file_name) LIKE ? AND is_deleted=FALSE LIMIT ?")) {
+        try (Connection connection = getConnection(); PreparedStatement preparedStatement = connection.prepareStatement("SELECT * FROM file_info WHERE LOWER(file_name) REGEXP ? AND is_deleted=FALSE")) {
+//        try (Connection connection = getConnection(); PreparedStatement prepareStatement = connection.prepareStatement("SELECT * FROM file_info LIMIT 10")) {
+//            preparedStatement.setString(1, "%" + query.trim().toLowerCase() + "%");
+            preparedStatement.setString(1, query.trim().toLowerCase());
+//            preparedStatement.setInt(2, maxResult);
+            ResultSet resultSet = preparedStatement.executeQuery();
+            while (resultSet.next()) {
+                list.add(readFileInfo(resultSet));
+            }
+        } catch (SQLException ex) {
+            throw new RuntimeException(ex);
+        }
+        return list;
+    }
+
+    @Override
+    public long countFileInfoBySearchTerm(String query) {
+        checkArgument(!isBlank(query));
+        try (Connection connection = getConnection(); PreparedStatement preparedStatement = connection.prepareStatement("SELECT COUNT(*) FROM file_info WHERE LOWER(file_name) REGEXP ? AND is_deleted=FALSE")) {
+//        try (Connection connection = getConnection(); PreparedStatement preparedStatement = connection.prepareStatement("SELECT COUNT(*) FROM file_info")) {
+            preparedStatement.setString(1, query.trim().toLowerCase());
+            ResultSet resultSet = preparedStatement.executeQuery();
+            checkArgument(resultSet.first());
+            return resultSet.getLong(1);
+        } catch (SQLException ex) {
+            throw new RuntimeException(ex);
+        }
+    }
+
     // FILE INFO - END
+    @Override
     public void clearIndex() {
         initDb();
         sequencer = new IndexRepoSequencer();
-        folderStatsDirty = true;
         indexInfoByDeviceIdAndFolder.invalidateAll();
+        folderStatsByFolder.invalidateAll();;
     }
 
     // FOLDER STATS - BEGIN
@@ -481,7 +565,13 @@ public class SqlRepository implements Closeable, IndexRepository, DeviceAddressR
     }
 
     public @Nullable
+    @Override
     FolderStats findFolderStats(String folder) {
+        return folderStatsByFolder.getUnchecked(folder).orNull();
+    }
+
+    private @Nullable
+    FolderStats doFindFolderStats(String folder) {
         try (Connection connection = getConnection(); PreparedStatement prepareStatement = connection.prepareStatement("SELECT * FROM folder_stats WHERE folder=?")) {
             prepareStatement.setString(1, folder);
             ResultSet resultSet = prepareStatement.executeQuery();
@@ -495,12 +585,15 @@ public class SqlRepository implements Closeable, IndexRepository, DeviceAddressR
         }
     }
 
+    @Override
     public List<FolderStats> findAllFolderStats() {
         List<FolderStats> list = Lists.newArrayList();
         try (Connection connection = getConnection(); PreparedStatement prepareStatement = connection.prepareStatement("SELECT * FROM folder_stats")) {
             ResultSet resultSet = prepareStatement.executeQuery();
             while (resultSet.next()) {
-                list.add(readFolderStats(resultSet));
+                FolderStats folderStats = readFolderStats(resultSet);
+                list.add(folderStats);
+                folderStatsByFolder.put(folderStats.getFolder(), Optional.of(folderStats));
             }
         } catch (SQLException ex) {
             throw new RuntimeException(ex);
@@ -508,78 +601,107 @@ public class SqlRepository implements Closeable, IndexRepository, DeviceAddressR
         return list;
     }
 
-    private void updateFolderStats() {
-        logger.info("updateFolderStats BEGIN");
-        final Map<String, FolderStats.Builder> map = Maps.newHashMap();
-        final Function<String, FolderStats.Builder> func = new Function<String, FolderStats.Builder>() {
-            @Override
-            public FolderStats.Builder apply(String folder) {
-                FolderStats.Builder res = map.get(folder);
-                if (res == null) {
-                    res = FolderStats.newBuilder().setFolder(folder);
-                    map.put(folder, res);
-                }
-                return res;
-            }
-        };
-        final List<FolderStats> list;
-        try (Connection connection = getConnection()) {
-            try (PreparedStatement prepareStatement = connection.prepareStatement("SELECT folder, COUNT(*) AS file_count, SUM(size) AS size, MAX(last_modified) AS last_update FROM file_info WHERE file_type=? AND is_deleted=FALSE GROUP BY folder")) {
-                prepareStatement.setString(1, FileType.FILE.name());
-                ResultSet resultSet = prepareStatement.executeQuery();
-                while (resultSet.next()) {
-                    FolderStats.Builder builder = func.apply(resultSet.getString("folder"));
-                    builder.setSize(resultSet.getLong("size"));
-                    builder.setFileCount(resultSet.getLong("file_count"));
-                    builder.setLastUpdate(new Date(resultSet.getLong("last_update")));
-                }
-            }
-            try (PreparedStatement prepareStatement = connection.prepareStatement("SELECT folder, COUNT(*) AS dir_count FROM file_info WHERE file_type=? AND is_deleted=FALSE GROUP BY folder")) {
-                prepareStatement.setString(1, FileType.DIRECTORY.name());
-                ResultSet resultSet = prepareStatement.executeQuery();
-                while (resultSet.next()) {
-                    FolderStats.Builder builder = func.apply(resultSet.getString("folder"));
-                    builder.setDirCount(resultSet.getLong("dir_count"));
-                }
-            }
-            list = Lists.newArrayList(Iterables.transform(map.values(), new Function<FolderStats.Builder, FolderStats>() {
-                @Override
-                public FolderStats apply(FolderStats.Builder builder) {
-                    return builder.build();
-                }
-            }));
-            for (FolderStats folderStats : list) {
-                try (PreparedStatement prepareStatement = connection.prepareStatement("MERGE INTO folder_stats"
-                    + " (folder,file_count,dir_count,size,last_update)"
-                    + " VALUES (?,?,?,?,?)")) {
-                    prepareStatement.setString(1, folderStats.getFolder());
-                    prepareStatement.setLong(2, folderStats.getFileCount());
-                    prepareStatement.setLong(3, folderStats.getDirCount());
-                    prepareStatement.setLong(4, folderStats.getSize());
-                    prepareStatement.setLong(5, folderStats.getLastUpdate().getTime());
-                    prepareStatement.executeUpdate();
-                }
-            }
-        } catch (SQLException ex) {
-            throw new RuntimeException(ex);
+    private FolderStats updateFolderStats(Connection connection, String folder, long deltaFileCount, long deltaDirCount, long deltaSize, Date lastUpdate) throws SQLException {
+        FolderStats oldFolderStats = findFolderStats(folder);
+        final FolderStats newFolderStats;
+        if (oldFolderStats == null) {
+            updateFolderStats(connection, newFolderStats = FolderStats.newBuilder()
+                .setDirCount(deltaDirCount)
+                .setFileCount(deltaFileCount)
+                .setFolder(folder)
+                .setLastUpdate(lastUpdate)
+                .setSize(deltaSize)
+                .build());
+        } else {
+            updateFolderStats(connection, newFolderStats = oldFolderStats.copyBuilder()
+                .setDirCount(oldFolderStats.getDirCount() + deltaDirCount)
+                .setFileCount(oldFolderStats.getFileCount() + deltaFileCount)
+                .setSize(oldFolderStats.getSize() + deltaSize)
+                .setLastUpdate(lastUpdate.after(oldFolderStats.getLastUpdate()) ? lastUpdate : oldFolderStats.getLastUpdate())
+                .build()
+            );
         }
-        logger.info("updateFolderStats END");
-        eventBus.post(new FolderStatsUpdatedEvent() {
-            @Override
-            public List<FolderStats> getFolderStats() {
-                return Collections.unmodifiableList(list);
-            }
-        });
+        return newFolderStats;
+    }
+
+//    private void updateFolderStats() {
+//        logger.info("updateFolderStats BEGIN");
+//        final Map<String, FolderStats.Builder> map = Maps.newHashMap();
+//        final Function<String, FolderStats.Builder> func = new Function<String, FolderStats.Builder>() {
+//            @Override
+//            public FolderStats.Builder apply(String folder) {
+//                FolderStats.Builder res = map.get(folder);
+//                if (res == null) {
+//                    res = FolderStats.newBuilder().setFolder(folder);
+//                    map.put(folder, res);
+//                }
+//                return res;
+//            }
+//        };
+//        final List<FolderStats> list;
+//        try (Connection connection = getConnection()) {
+//            try (PreparedStatement prepareStatement = connection.prepareStatement("SELECT folder, COUNT(*) AS file_count, SUM(size) AS size, MAX(last_modified) AS last_update FROM file_info WHERE file_type=? AND is_deleted=FALSE GROUP BY folder")) {
+//                prepareStatement.setString(1, FileType.FILE.name());
+//                ResultSet resultSet = prepareStatement.executeQuery();
+//                while (resultSet.next()) {
+//                    FolderStats.Builder builder = func.apply(resultSet.getString("folder"));
+//                    builder.setSize(resultSet.getLong("size"));
+//                    builder.setFileCount(resultSet.getLong("file_count"));
+//                    builder.setLastUpdate(new Date(resultSet.getLong("last_update")));
+//                }
+//            }
+//            try (PreparedStatement prepareStatement = connection.prepareStatement("SELECT folder, COUNT(*) AS dir_count FROM file_info WHERE file_type=? AND is_deleted=FALSE GROUP BY folder")) {
+//                prepareStatement.setString(1, FileType.DIRECTORY.name());
+//                ResultSet resultSet = prepareStatement.executeQuery();
+//                while (resultSet.next()) {
+//                    FolderStats.Builder builder = func.apply(resultSet.getString("folder"));
+//                    builder.setDirCount(resultSet.getLong("dir_count"));
+//                }
+//            }
+//            list = Lists.newArrayList(Iterables.transform(map.values(), new Function<FolderStats.Builder, FolderStats>() {
+//                @Override
+//                public FolderStats apply(FolderStats.Builder builder) {
+//                    return builder.build();
+//                }
+//            }));
+//            for (FolderStats folderStats : list) {
+//                updateFolderStats(connection, folderStats);
+//            }
+//        } catch (SQLException ex) {
+//            throw new RuntimeException(ex);
+//        }
+//        logger.info("updateFolderStats END");
+//        eventBus.post(new FolderStatsUpdatedEvent() {
+//            @Override
+//            public List<FolderStats> getFolderStats() {
+//                return Collections.unmodifiableList(list);
+//            }
+//        });
+//    }
+    private void updateFolderStats(Connection connection, final FolderStats folderStats) throws SQLException {
+        checkArgument(folderStats.getFileCount() >= 0);
+        checkArgument(folderStats.getDirCount() >= 0);
+        checkArgument(folderStats.getSize() >= 0);
+        try (PreparedStatement prepareStatement = connection.prepareStatement("MERGE INTO folder_stats"
+            + " (folder,file_count,dir_count,size,last_update)"
+            + " VALUES (?,?,?,?,?)")) {
+            prepareStatement.setString(1, folderStats.getFolder());
+            prepareStatement.setLong(2, folderStats.getFileCount());
+            prepareStatement.setLong(3, folderStats.getDirCount());
+            prepareStatement.setLong(4, folderStats.getSize());
+            prepareStatement.setLong(5, folderStats.getLastUpdate().getTime());
+            prepareStatement.executeUpdate();
+        }
     }
 
     @Override
     public void close() {
         logger.info("closing index repository (sql)");
-        scheduledExecutorService.shutdown();
+//        scheduledExecutorService.shutdown();
         if (!dataSource.isClosed()) {
             dataSource.close();
         }
-        ExecutorUtils.awaitTerminationSafe(scheduledExecutorService);
+//        ExecutorUtils.awaitTerminationSafe(scheduledExecutorService);
     }
 
     //SEQUENCER
@@ -630,7 +752,6 @@ public class SqlRepository implements Closeable, IndexRepository, DeviceAddressR
     }
 
     /* device BEGIN */
-    
     private DeviceAddress readDeviceAddress(ResultSet resultSet) throws SQLException {
         long instanceId = resultSet.getLong("instance_id");
         return DeviceAddress.newBuilder()
@@ -643,6 +764,7 @@ public class SqlRepository implements Closeable, IndexRepository, DeviceAddressR
             .build();
     }
 
+    @Override
     public List<DeviceAddress> findAllDeviceAddress() {
         List<DeviceAddress> list = Lists.newArrayList();
         try (Connection connection = getConnection(); PreparedStatement prepareStatement = connection.prepareStatement("SELECT * FROM device_address ORDER BY last_modified DESC")) {
@@ -656,6 +778,7 @@ public class SqlRepository implements Closeable, IndexRepository, DeviceAddressR
         return list;
     }
 
+    @Override
     public void updateDeviceAddress(DeviceAddress deviceAddress) {
         try (Connection connection = getConnection(); PreparedStatement prepareStatement = connection.prepareStatement("MERGE INTO device_address"
             + " (device_id,instance_id,address_url,address_producer,address_type,address_score,is_working,last_modified)"

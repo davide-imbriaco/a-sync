@@ -13,7 +13,7 @@
  */
 package it.anyplace.sync.client;
 
-import it.anyplace.sync.core.Configuration;
+import it.anyplace.sync.core.configuration.ConfigurationService;
 import com.google.common.base.Function;
 import com.google.common.collect.Lists;
 import it.anyplace.sync.discovery.protocol.gd.GlobalDiscoveryHandler;
@@ -38,8 +38,12 @@ import it.anyplace.sync.bep.BlockPusher;
 import it.anyplace.sync.bep.BlockPusher.IndexEditObserver;
 import it.anyplace.sync.bep.IndexBrowser;
 import it.anyplace.sync.core.beans.FileInfo;
-import static com.google.common.base.Preconditions.checkArgument;
 import it.anyplace.sync.discovery.DeviceAddressSupplier;
+import it.anyplace.sync.core.beans.DeviceInfo;
+import java.util.Collections;
+import static com.google.common.base.Preconditions.checkArgument;
+import it.anyplace.sync.bep.IndexFinder;
+import org.apache.commons.io.IOUtils;
 
 /**
  *
@@ -66,6 +70,7 @@ public class Main {
         options.addOption("I", "list-info", false, "dump folder info from network");
         options.addOption("li", "list-info", false, "list folder info from local db");
 //        options.addOption("l", "list-local", false, "list folder content from local (saved) index");
+        options.addOption("s", "search", true, "search local index for <term>");
         options.addOption("D", "delete", true, "push delete to network");
         options.addOption("M", "mkdir", true, "push directory create to network");
         options.addOption("h", "help", false, "print help");
@@ -80,13 +85,13 @@ public class Main {
 
         File configFile = cmd.hasOption("C") ? new File(cmd.getOptionValue("C")) : new File(System.getProperty("user.home"), ".s-client.properties");
         logger.info("using config file = {}", configFile);
-        Configuration configuration = new Configuration(configFile);
-        configuration.clearTempDir();
-        KeystoreHandler keystoreHandler = new KeystoreHandler(configuration);//init key
+        ConfigurationService configuration = ConfigurationService.newLoader().loadFrom(configFile);
+        FileUtils.cleanDirectory(configuration.getTemp());
+        KeystoreHandler.newLoader().loadAndStore(configuration);
         if (cmd.hasOption("c")) {
-            logger.info("configuration =\n{}", configuration.dumpToString());
+            logger.info("configuration =\n{}", configuration.newWriter().dumpToString());
         } else {
-            logger.trace("configuration =\n{}", configuration.dumpToString());
+            logger.trace("configuration =\n{}", configuration.newWriter().dumpToString());
         }
         logger.debug("{}", configuration.getStorageInfo().dumpAvailableSpace());
 
@@ -99,11 +104,12 @@ public class Main {
                 }
             }));
             logger.info("set peers = {}", peers);
+            configuration.edit().setPeers(Collections.<DeviceInfo>emptyList());
             for (String peer : peers) {
                 KeystoreHandler.validateDeviceId(peer);
+                configuration.edit().addPeers(new DeviceInfo(peer, null));
             }
-            configuration.setPeers(peers);
-            configuration.storeConfiguration();
+            configuration.edit().persistNow();
         }
 
         if (cmd.hasOption("q")) {
@@ -199,24 +205,48 @@ public class Main {
                 } else {
                     client.waitForRemoteIndexAquired();
                 }
+                String folderInfo = "";
                 for (String folder : client.getIndexHandler().getFolderList()) {
-                    logger.info("folder info = {}", client.getIndexHandler().getFolderInfo(folder));
-                    logger.info("folder stats = {}", client.getIndexHandler().newFolderBrowser().getFolderStats(folder).dumpInfo());
+                    folderInfo += "\n\t\tfolder info : " + client.getIndexHandler().getFolderInfo(folder);
+                    folderInfo += "\n\t\tfolder stats : " + client.getIndexHandler().newFolderBrowser().getFolderStats(folder).dumpInfo() + "\n";
                 }
+                logger.info("folders:\n{}\n", folderInfo);
             }
         }
         if (cmd.hasOption("li")) {
             try (SyncthingClient client = new SyncthingClient(configuration)) {
+                String folderInfo = "";
                 for (String folder : client.getIndexHandler().getFolderList()) {
-                    logger.info("folder info = {}", client.getIndexHandler().getFolderInfo(folder));
-                    logger.info("folder stats = {}", client.getIndexHandler().newFolderBrowser().getFolderStats(folder).dumpInfo());
+                    folderInfo += "\n\t\tfolder info : " + client.getIndexHandler().getFolderInfo(folder);
+                    folderInfo += "\n\t\tfolder stats : " + client.getIndexHandler().newFolderBrowser().getFolderStats(folder).dumpInfo() + "\n";
                 }
+                logger.info("folders:\n{}\n", folderInfo);
             }
         }
         if (cmd.hasOption("lp")) {
             try (SyncthingClient client = new SyncthingClient(configuration); DeviceAddressSupplier deviceAddressSupplier = client.getDiscoveryHandler().newDeviceAddressSupplier()) {
+                String deviceAddressesStr = "";
                 for (DeviceAddress deviceAddress : Lists.newArrayList(deviceAddressSupplier)) {
-                    logger.info("deviceAddress {} : {}", deviceAddress.getDeviceId(), deviceAddress.getAddress());
+                    deviceAddressesStr += "\n\t\t" + deviceAddress.getDeviceId() + " : " + deviceAddress.getAddress();
+                }
+                logger.info("device addresses:\n{}\n", deviceAddressesStr);
+            }
+        }
+        if (cmd.hasOption("s")) {
+            String term = cmd.getOptionValue("s");
+            try (SyncthingClient client = new SyncthingClient(configuration); IndexFinder indexFinder = client.getIndexHandler().newIndexFinderBuilder().build()) {
+                client.waitForRemoteIndexAquired();
+                logger.info("search term = '{}'", term);
+                IndexFinder.SearchCompletedEvent event = indexFinder.doSearch(term);
+                if (event.hasGoodResults()) {
+                    logger.info("search results for term = '{}' :", term);
+                    for (FileInfo fileInfo : event.getResultList()) {
+                        logger.info("\t\t{} {} {}", fileInfo.getType().name().substring(0, 1), fileInfo.getPath(), fileInfo.describeSize());
+                    }
+                } else if (event.hasTooManyResults()) {
+                    logger.info("too many results found for term = '{}'", term);
+                } else {
+                    logger.info("no result found for term = '{}'", term);
                 }
             }
         }
@@ -224,6 +254,7 @@ public class Main {
 //            String indexDump = new IndexHandler(configuration).dumpIndex();
 //            logger.info("index dump = \n\n{}\n", indexDump);
 //        }
+        IOUtils.closeQuietly(configuration);
     }
 
 }

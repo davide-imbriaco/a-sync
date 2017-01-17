@@ -16,7 +16,7 @@ package it.anyplace.sync.client.protocol.rp;
 import it.anyplace.sync.core.interfaces.RelayConnection;
 import com.google.common.base.MoreObjects;
 import com.google.common.base.Preconditions;
-import it.anyplace.sync.core.Configuration;
+import it.anyplace.sync.core.configuration.ConfigurationService;
 import it.anyplace.sync.core.beans.DeviceAddress;
 import it.anyplace.sync.core.beans.DeviceAddress.AddressType;
 import it.anyplace.sync.core.security.KeystoreHandler;
@@ -35,9 +35,9 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import java.nio.ByteBuffer;
 import static it.anyplace.sync.core.security.KeystoreHandler.RELAY;
-import static com.google.common.base.Preconditions.checkArgument;
 import com.google.common.io.BaseEncoding;
 import it.anyplace.sync.client.protocol.rp.beans.SessionInvitation;
+import static com.google.common.base.Preconditions.checkArgument;
 
 /**
  *
@@ -52,12 +52,12 @@ public class RelayClient {
         SESSION_INVITATION = 6,
         RESPONSE_SUCCESS_CODE = 0;
     private final Logger logger = LoggerFactory.getLogger(getClass());
-    private final Configuration configuration;
+    private final ConfigurationService configuration;
     private final KeystoreHandler keystoreHandler;
 
-    public RelayClient(Configuration configuration) {
+    public RelayClient(ConfigurationService configuration) {
         this.configuration = configuration;
-        this.keystoreHandler = new KeystoreHandler(configuration);
+        this.keystoreHandler = KeystoreHandler.newLoader().loadAndStore(configuration);
     }
 
     public RelayConnection openRelayConnection(DeviceAddress address) throws Exception {
@@ -110,7 +110,6 @@ public class RelayClient {
             throw ex;
         }
     }
-
 
     public SessionInvitation getSessionInvitation(InetSocketAddress relaySocketAddress, String deviceId) throws Exception {
         logger.debug("connecting to relay = {} (temporary protocol mode)", relaySocketAddress);

@@ -19,7 +19,6 @@ import com.google.common.collect.Lists;
 import it.anyplace.sync.core.beans.FileInfo;
 import java.util.Collections;
 import java.util.List;
-import com.google.common.collect.ComparisonChain;
 import it.anyplace.sync.core.utils.PathUtils;
 import static it.anyplace.sync.core.utils.PathUtils.*;
 import java.util.Comparator;
@@ -37,10 +36,12 @@ import java.util.concurrent.TimeUnit;
 import static com.google.common.base.Strings.emptyToNull;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import it.anyplace.sync.core.interfaces.IndexRepository;
+import static it.anyplace.sync.core.utils.FileInfoOrdering.ALPHA_ASC_DIR_FIRST;
+import java.util.concurrent.atomic.AtomicInteger;
 import static com.google.common.base.Preconditions.checkArgument;
 import static com.google.common.base.Preconditions.checkNotNull;
-import it.anyplace.sync.core.interfaces.IndexRepository;
-import java.util.concurrent.atomic.AtomicInteger;
+import java.util.Map;
 
 /**
  *
@@ -49,13 +50,6 @@ import java.util.concurrent.atomic.AtomicInteger;
 public final class IndexBrowser implements Closeable {
 
     private final Logger logger = LoggerFactory.getLogger(getClass());
-    public final static Comparator<FileInfo> DEFAULT_ORDERING = new Comparator<FileInfo>() {
-        @Override
-        public int compare(FileInfo a, FileInfo b) {
-            return ComparisonChain.start().compare(a.isDirectory() ? 1 : 2, b.isDirectory() ? 1 : 2).compare(a.getPath(), b.getPath()).result();
-        }
-
-    };
     private final LoadingCache<String, List<FileInfo>> listFolderCache = CacheBuilder.newBuilder()
         .expireAfterWrite(10, TimeUnit.MINUTES)
         //        .weigher(new Weigher<String, List<FileInfo>>() {
@@ -94,7 +88,7 @@ public final class IndexBrowser implements Closeable {
     private String currentPath;
     private final boolean includeParentInList, allowParentInRoot;
     private final FileInfo PARENT_FILE_INFO, ROOT_FILE_INFO;
-    private Comparator<FileInfo> ordering = DEFAULT_ORDERING;
+    private Comparator<FileInfo> ordering;
     private final ScheduledExecutorService executorService = Executors.newSingleThreadScheduledExecutor();
     private final Object indexHandlerEventListener = new Object() {
         @Subscribe
@@ -107,7 +101,7 @@ public final class IndexBrowser implements Closeable {
     };
     private final AtomicInteger jobsInQueue = new AtomicInteger(0);
 
-    private IndexBrowser(IndexRepository indexRepository, IndexHandler indexHandler, String folder, boolean includeParentInList, boolean allowParentInRoot) {
+    private IndexBrowser(IndexRepository indexRepository, IndexHandler indexHandler, String folder, boolean includeParentInList, boolean allowParentInRoot, Comparator<FileInfo> ordering) {
         checkNotNull(indexRepository);
         checkNotNull(indexHandler);
         checkNotNull(emptyToNull(folder));
@@ -117,6 +111,7 @@ public final class IndexBrowser implements Closeable {
         this.folder = folder;
         this.includeParentInList = includeParentInList;
         this.allowParentInRoot = allowParentInRoot;
+        this.ordering = ordering;
         PARENT_FILE_INFO = FileInfo.newBuilder()
             .setFolder(folder)
             .setTypeDir()
@@ -146,7 +141,7 @@ public final class IndexBrowser implements Closeable {
     }
 
     private void preloadFileInfoForCurrentPath() {
-        logger.info("trigger preload");
+        logger.debug("trigger preload");
         final String preloadPath = currentPath;
         executorService.submit(new Runnable() {
             {
@@ -181,6 +176,18 @@ public final class IndexBrowser implements Closeable {
         return jobsInQueue.get() == 0;
     }
 
+    public boolean isCacheReadyAfterALittleWait() {
+        synchronized (jobsInQueue) {
+            if (!isCacheReady()) {
+                try {
+                    jobsInQueue.wait(100);
+                } catch (InterruptedException ex) {
+                }
+            }
+        }
+        return isCacheReady();
+    }
+
     public IndexBrowser waitForCacheReady() {
         logger.debug("waiting for cache to be ready");
         synchronized (jobsInQueue) {
@@ -206,10 +213,19 @@ public final class IndexBrowser implements Closeable {
         return getFileInfoByAbsolutePath(getCurrentPath());
     }
 
-    public IndexBrowser withOrdering(Comparator<FileInfo> ordering) {
+    public String getCurrentPathFileName() {
+        return PathUtils.getFileName(getCurrentPath());
+    }
+
+    public IndexBrowser setOrdering(Comparator<FileInfo> ordering) {
         checkNotNull(ordering);
         this.ordering = ordering;
-        invalidateCache();
+        //re-sort all data in cache
+        for (Map.Entry<String, List<FileInfo>> entry : Lists.newArrayList(listFolderCache.asMap().entrySet())) {
+            List<FileInfo> res = Lists.newArrayList(entry.getValue());
+            Collections.sort(res, IndexBrowser.this.ordering);
+            listFolderCache.put(entry.getKey(), res);
+        }
         return this;
     }
 
@@ -218,14 +234,14 @@ public final class IndexBrowser implements Closeable {
     }
 
     public List<FileInfo> listFiles(String absoluteDirPath) {
-        logger.info("listFiles for path = '{}'", absoluteDirPath);
+        logger.debug("listFiles for path = '{}'", absoluteDirPath);
         return listFolderCache.getUnchecked(absoluteDirPath);
     }
 
     private List<FileInfo> doListFiles(String path) {
-        logger.info("doListFiles for path = '{}' BEGIN", path);
+        logger.debug("doListFiles for path = '{}' BEGIN", path);
         List<FileInfo> list = indexRepository.findNotDeletedFilesByFolderAndParent(folder, path);
-        logger.info("doListFiles for path = '{}' : {} records loaded)", path, list.size());
+        logger.debug("doListFiles for path = '{}' : {} records loaded)", path, list.size());
         for (FileInfo fileInfo : list) {
             fileInfoCache.put(fileInfo.getPath(), fileInfo);
         }
@@ -233,8 +249,8 @@ public final class IndexBrowser implements Closeable {
         if (includeParentInList && (!PathUtils.isRoot(path) || allowParentInRoot)) {
             list.add(0, PARENT_FILE_INFO);
         }
-        logger.info("doListFiles for path = '{}' : loaded list = {}", list);
-        logger.info("doListFiles for path = '{}' END", path);
+        logger.debug("doListFiles for path = '{}' : loaded list = {}", list);
+        logger.debug("doListFiles for path = '{}' END", path);
         return Collections.unmodifiableList(list);
     }
 
@@ -260,10 +276,10 @@ public final class IndexBrowser implements Closeable {
     }
 
     private FileInfo doGetFileInfoByAbsolutePath(String path) {
-        logger.info("doGetFileInfoByAbsolutePath for path = '{}' BEGIN", path);
+        logger.debug("doGetFileInfoByAbsolutePath for path = '{}' BEGIN", path);
         FileInfo fileInfo = indexRepository.findNotDeletedFileInfo(folder, path);
         checkNotNull(fileInfo, "file not found for path = %s", path);
-        logger.info("doGetFileInfoByAbsolutePath for path = '{}' END", path);
+        logger.debug("doGetFileInfoByAbsolutePath for path = '{}' END", path);
         return fileInfo;
     }
 
@@ -332,6 +348,7 @@ public final class IndexBrowser implements Closeable {
         private IndexRepository indexRepository;
         private IndexHandler indexHandler;
         private boolean includeParentInList, allowParentInRoot;
+        private Comparator<FileInfo> ordering = ALPHA_ASC_DIR_FIRST;
 
         private Builder() {
 
@@ -382,16 +399,26 @@ public final class IndexBrowser implements Closeable {
             return this;
         }
 
+        public Comparator<FileInfo> getOrdering() {
+            return ordering;
+        }
+
+        public Builder setOrdering(Comparator<FileInfo> ordering) {
+            checkNotNull(ordering);
+            this.ordering = ordering;
+            return this;
+        }
+
         public IndexBrowser build() {
             return buildToAbsolutePath(ROOT_PATH);
         }
 
         public IndexBrowser buildToNearestPath(@Nullable String oldPath) {
-            return new IndexBrowser(indexRepository, indexHandler, folder, includeParentInList, allowParentInRoot).navigateToNearestPath(oldPath);
+            return new IndexBrowser(indexRepository, indexHandler, folder, includeParentInList, allowParentInRoot, ordering).navigateToNearestPath(oldPath);
         }
 
         public IndexBrowser buildToAbsolutePath(String absolutePath) {
-            return new IndexBrowser(indexRepository, indexHandler, folder, includeParentInList, allowParentInRoot).navigateToAbsolutePath(absolutePath);
+            return new IndexBrowser(indexRepository, indexHandler, folder, includeParentInList, allowParentInRoot, ordering).navigateToAbsolutePath(absolutePath);
         }
     }
 }

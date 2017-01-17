@@ -13,20 +13,16 @@
  */
 package it.anyplace.sync.core.utils;
 
-import it.anyplace.sync.core.Configuration;
+import it.anyplace.sync.core.configuration.ConfigurationService;
 import java.io.File;
 import java.util.UUID;
 
-/**
- *
- * @author aleph
- */
 public class FileUtils {
 
-    public static File createTempFile(Configuration configuration) {
+    public static File createTempFile(ConfigurationService configuration) {
         File tempFile = new File(configuration.getTemp(), UUID.randomUUID().toString());
-//            logger.debug("use temp file = {}", tempFile);
         tempFile.deleteOnExit();
         return tempFile;
     }
+
 }

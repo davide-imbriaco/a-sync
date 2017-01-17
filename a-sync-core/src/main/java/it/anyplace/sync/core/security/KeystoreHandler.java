@@ -19,7 +19,7 @@ import com.google.common.base.Joiner;
 import static com.google.common.base.Objects.equal;
 import com.google.common.base.Splitter;
 import com.google.common.collect.Iterables;
-import it.anyplace.sync.core.Configuration;
+import it.anyplace.sync.core.configuration.ConfigurationService;
 import java.io.ByteArrayInputStream;
 import java.io.ByteArrayOutputStream;
 import java.io.IOException;
@@ -66,6 +66,9 @@ import javax.net.ssl.SSLSession;
 import static org.apache.commons.lang3.StringUtils.isBlank;
 import static com.google.common.base.Preconditions.checkArgument;
 import static com.google.common.base.Preconditions.checkNotNull;
+import com.google.common.cache.Cache;
+import com.google.common.cache.CacheBuilder;
+import org.apache.commons.lang3.tuple.Pair;
 
 /**
  *
@@ -85,86 +88,22 @@ public class KeystoreHandler {
     private final static int KEY_SIZE = 3072, SOCKET_TIMEOUT = 2000;
 
     private final Logger logger = LoggerFactory.getLogger(getClass());
-    private final Configuration configuration;
-    private KeyStore keyStore;
+    private final ConfigurationService configuration;
+    private final KeyStore keyStore;
 
     static {
         Security.addProvider(new BouncyCastleProvider());
     }
 
-    public KeystoreHandler(Configuration configuration) {
+    private KeystoreHandler(ConfigurationService configuration, KeyStore keyStore) {
+        checkNotNull(configuration);
+        checkNotNull(keyStore);
         this.configuration = configuration;
-        try {
-            if (configuration.hasData(CONFIGURATION_KEYSTORE_PROP)) {
-                importKeystore(configuration.getData(CONFIGURATION_KEYSTORE_PROP)); //TODO load device id from keystore
-            } else if (configuration.isKeystoreRequired()) {
-                generateKeystore();
-                checkNotNull(keyStore);
-            }
-            logger.trace("keystore ready, device id = {}", configuration.getDeviceId());
-        } catch (Exception ex) {
-            throw new RuntimeException(ex);
-        }
-    }
-
-    private void generateKeystore() throws Exception {
-        logger.debug("generating key");
-        KeyPairGenerator keyPairGenerator = KeyPairGenerator.getInstance(KEY_ALGO, BouncyCastleProvider.PROVIDER_NAME);
-        keyPairGenerator.initialize(KEY_SIZE);
-        KeyPair keyPair = keyPairGenerator.genKeyPair();
-
-        ContentSigner contentSigner = new JcaContentSignerBuilder(SIGNATURE_ALGO).setProvider(BC_PROVIDER).build(keyPair.getPrivate());
-
-        Date startDate = new Date(System.currentTimeMillis() - (24 * 60 * 60 * 1000));
-        Date endDate = new Date(System.currentTimeMillis() + (10 * 365 * 24 * 60 * 60 * 1000));
-
-        X509v1CertificateBuilder certificateBuilder = new JcaX509v1CertificateBuilder(new X500Principal(CERTIFICATE_CN), BigInteger.ZERO, startDate, endDate, new X500Principal(CERTIFICATE_CN), keyPair.getPublic());
-
-        X509CertificateHolder certificateHolder = certificateBuilder.build(contentSigner);
-
-        byte[] certificateDerData = certificateHolder.getEncoded();
-        logger.info("generated cert =\n{}", derToPem(certificateDerData));
-        String deviceId = derDataToDeviceIdString(certificateDerData);
-        logger.info("device id from cert = {}", deviceId);
-
-        String keystoreAlgo = getKeystoreAlgo();
-        keyStore = KeyStore.getInstance(keystoreAlgo);
-        keyStore.load(null, null);
-        Certificate[] certChain = new Certificate[1];
-        certChain[0] = new JcaX509CertificateConverter().setProvider(BC_PROVIDER).getCertificate(certificateHolder);
-        keyStore.setKeyEntry("key", keyPair.getPrivate(), KEY_PASSWORD.toCharArray(), certChain);
-
-        configuration.storeData(CONFIGURATION_KEYSTORE_PROP, exportKeystoreToData());
-        configuration.setProperty(CONFIGURATION_DEVICEID_PROP, deviceId);
-        configuration.storeConfiguration();
+        this.keyStore = keyStore;
     }
 
     private static String derToPem(byte[] der) {
         return "-----BEGIN CERTIFICATE-----\n" + BaseEncoding.base64().withSeparator("\n", 76).encode(der) + "\n-----END CERTIFICATE-----";
-    }
-
-    private String getKeystoreAlgo() {
-        String keystoreAlgo = configuration.getProperty("keystorealgo");
-        if (isBlank(keystoreAlgo)) {
-            keystoreAlgo = KeyStore.getDefaultType();
-            checkNotNull(keystoreAlgo);
-            logger.debug("keystore algo set to {}", keystoreAlgo);
-            configuration.setProperty("keystorealgo", keystoreAlgo);
-        }
-        return keystoreAlgo;
-    }
-
-    private void importKeystore(byte[] keystoreData) throws Exception {
-        String keystoreAlgo = getKeystoreAlgo();
-        keyStore = KeyStore.getInstance(keystoreAlgo);
-        keyStore.load(new ByteArrayInputStream(keystoreData), JKS_PASSWORD.toCharArray());
-        String alias = keyStore.aliases().nextElement();
-        Certificate certificate = keyStore.getCertificate(alias);
-        checkArgument(certificate instanceof X509Certificate);
-        byte[] derData = certificate.getEncoded();
-        String deviceId = derDataToDeviceIdString(derData);
-        logger.debug("loaded device id from cert = {}", deviceId);
-        configuration.setProperty(CONFIGURATION_DEVICEID_PROP, deviceId);
     }
 
     private byte[] exportKeystoreToData() {
@@ -289,7 +228,7 @@ public class KeystoreHandler {
                     logger.debug("ALPN select protocol = {}", protocol);
                 }
             });
-        } catch (ClassNotFoundException|NoClassDefFoundError cne) {
+        } catch (ClassNotFoundException | NoClassDefFoundError cne) {
             logger.warn("ALPN not available, org.eclipse.jetty.alpn.ALPN not found! ( requires java -Xbootclasspath/p:path/to/alpn-boot.jar )");
         }
     }
@@ -311,4 +250,110 @@ public class KeystoreHandler {
     public Socket wrapSocket(RelayConnection relayConnection, String... protocols) throws Exception {
         return wrapSocket(relayConnection.getSocket(), relayConnection.isServerSocket(), protocols);
     }
+
+    public static Loader newLoader() {
+        return new Loader();
+    }
+
+    public static class Loader {
+
+        private final Logger logger = LoggerFactory.getLogger(getClass());
+        private final static Cache<String, KeystoreHandler> keystoreHandlersCacheByHash = CacheBuilder.newBuilder()
+            .maximumSize(10)
+            .build();
+
+        private Loader() {
+
+        }
+
+        public KeystoreHandler loadAndStore(ConfigurationService configuration) {
+            synchronized (keystoreHandlersCacheByHash) {
+                boolean isNew = false;
+                byte[] keystoreData = configuration.getKeystore();
+                if (keystoreData != null) {
+                    KeystoreHandler keystoreHandlerFromCache = keystoreHandlersCacheByHash.getIfPresent(BaseEncoding.base32().encode(Hashing.sha256().hashBytes(keystoreData).asBytes()));
+                    if (keystoreHandlerFromCache != null) {
+                        return keystoreHandlerFromCache;
+                    }
+                }
+                String keystoreAlgo = configuration.getKeystoreAlgo();
+                if (isBlank(keystoreAlgo)) {
+                    keystoreAlgo = KeyStore.getDefaultType();
+                    checkNotNull(keystoreAlgo);
+                    logger.debug("keystore algo set to {}", keystoreAlgo);
+                    configuration.edit().setKeystoreAlgo(keystoreAlgo);
+                }
+                Pair<KeyStore, String> keyStore = null;
+                if (keystoreData != null) {
+                    try {
+                        keyStore = importKeystore(keystoreData, configuration);
+                    } catch (Exception ex) {
+                        logger.error("error importing keystore", ex);
+                    }
+                }
+                if (keyStore == null) {
+                    try {
+                        keyStore = generateKeystore(configuration);
+                        isNew = true;
+                    } catch (Exception ex) {
+                        logger.error("error generating keystore", ex);
+                    }
+                }
+                checkNotNull(keyStore, "unable to aquire keystore");
+                KeystoreHandler keystoreHandler = new KeystoreHandler(configuration, keyStore.getLeft());
+                if (isNew) {
+                    configuration.edit()
+                        .setDeviceId(keyStore.getRight())
+                        .setKeystore(keystoreData = keystoreHandler.exportKeystoreToData())
+                        .setKeystoreAlgo(keystoreAlgo)
+                        .persistLater();
+                }
+                keystoreHandlersCacheByHash.put(BaseEncoding.base32().encode(Hashing.sha256().hashBytes(keystoreData).asBytes()), keystoreHandler);
+                logger.info("keystore ready, device id = {}", configuration.getDeviceId());
+                return keystoreHandler;
+            }
+        }
+
+        private Pair<KeyStore, String> generateKeystore(ConfigurationService configuration) throws Exception {
+            logger.debug("generating key");
+            KeyPairGenerator keyPairGenerator = KeyPairGenerator.getInstance(KEY_ALGO, BouncyCastleProvider.PROVIDER_NAME);
+            keyPairGenerator.initialize(KEY_SIZE);
+            KeyPair keyPair = keyPairGenerator.genKeyPair();
+
+            ContentSigner contentSigner = new JcaContentSignerBuilder(SIGNATURE_ALGO).setProvider(BC_PROVIDER).build(keyPair.getPrivate());
+
+            Date startDate = new Date(System.currentTimeMillis() - (24 * 60 * 60 * 1000));
+            Date endDate = new Date(System.currentTimeMillis() + (10 * 365 * 24 * 60 * 60 * 1000));
+
+            X509v1CertificateBuilder certificateBuilder = new JcaX509v1CertificateBuilder(new X500Principal(CERTIFICATE_CN), BigInteger.ZERO, startDate, endDate, new X500Principal(CERTIFICATE_CN), keyPair.getPublic());
+
+            X509CertificateHolder certificateHolder = certificateBuilder.build(contentSigner);
+
+            byte[] certificateDerData = certificateHolder.getEncoded();
+            logger.info("generated cert =\n{}", derToPem(certificateDerData));
+            String deviceId = derDataToDeviceIdString(certificateDerData);
+            logger.info("device id from cert = {}", deviceId);
+
+            KeyStore keyStore = KeyStore.getInstance(configuration.getKeystoreAlgo());
+            keyStore.load(null, null);
+            Certificate[] certChain = new Certificate[1];
+            certChain[0] = new JcaX509CertificateConverter().setProvider(BC_PROVIDER).getCertificate(certificateHolder);
+            keyStore.setKeyEntry("key", keyPair.getPrivate(), KEY_PASSWORD.toCharArray(), certChain);
+            return Pair.of(keyStore, deviceId);
+        }
+
+        private Pair<KeyStore, String> importKeystore(byte[] keystoreData, ConfigurationService configuration) throws Exception {
+            String keystoreAlgo = configuration.getKeystoreAlgo();
+            KeyStore keyStore = KeyStore.getInstance(keystoreAlgo);
+            keyStore.load(new ByteArrayInputStream(keystoreData), JKS_PASSWORD.toCharArray());
+            String alias = keyStore.aliases().nextElement();
+            Certificate certificate = keyStore.getCertificate(alias);
+            checkArgument(certificate instanceof X509Certificate);
+            byte[] derData = certificate.getEncoded();
+            String deviceId = derDataToDeviceIdString(derData);
+            logger.debug("loaded device id from cert = {}", deviceId);
+            return Pair.of(keyStore, deviceId);
+        }
+    }
+
 }

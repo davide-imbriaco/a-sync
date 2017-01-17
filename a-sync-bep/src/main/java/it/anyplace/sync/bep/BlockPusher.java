@@ -21,7 +21,7 @@ import com.google.common.collect.Lists;
 import com.google.common.collect.Sets;
 import com.google.common.eventbus.Subscribe;
 import com.google.protobuf.ByteString;
-import it.anyplace.sync.core.Configuration;
+import it.anyplace.sync.core.configuration.ConfigurationService;
 import it.anyplace.sync.bep.protos.BlockExchageProtos.BlockInfo;
 import it.anyplace.sync.bep.protos.BlockExchageProtos.Counter;
 import it.anyplace.sync.bep.protos.BlockExchageProtos.IndexUpdate;
@@ -61,9 +61,11 @@ import java.io.FileNotFoundException;
 import org.apache.commons.io.FileUtils;
 import static it.anyplace.sync.core.utils.FileUtils.createTempFile;
 import it.anyplace.sync.core.utils.BlockUtils;
+import java.util.concurrent.atomic.AtomicBoolean;
 import static com.google.common.base.Preconditions.checkArgument;
 import static com.google.common.base.Preconditions.checkNotNull;
-import java.util.concurrent.atomic.AtomicBoolean;
+import static com.google.common.base.Preconditions.checkArgument;
+import static com.google.common.base.Preconditions.checkNotNull;
 
 /**
  *
@@ -73,17 +75,17 @@ public class BlockPusher {
 
     public final static int BLOCK_SIZE = 128 * 1024;
     private final Logger logger = LoggerFactory.getLogger(getClass());
-    private final Configuration configuration;
+    private final ConfigurationService configuration;
     private final BlockExchangeConnectionHandler connectionHandler;
     private IndexHandler indexHandler;
     private boolean closeConnection = false;
 
-    public BlockPusher(Configuration configuration, BlockExchangeConnectionHandler connectionHandler) {
+    public BlockPusher(ConfigurationService configuration, BlockExchangeConnectionHandler connectionHandler) {
         this.configuration = configuration;
         this.connectionHandler = connectionHandler;
     }
 
-    public BlockPusher(Configuration configuration, BlockExchangeConnectionHandler connectionHandler, boolean closeConnection) {
+    public BlockPusher(ConfigurationService configuration, BlockExchangeConnectionHandler connectionHandler, boolean closeConnection) {
         this(configuration, connectionHandler);
         this.closeConnection = closeConnection;
     }

@@ -17,10 +17,12 @@ import com.google.common.base.Predicate;
 import com.google.common.collect.Iterables;
 import com.google.common.collect.Lists;
 import com.google.common.collect.Maps;
+import com.google.common.collect.Sets;
 import com.google.common.eventbus.EventBus;
 import com.google.common.eventbus.Subscribe;
-import it.anyplace.sync.core.Configuration;
+import it.anyplace.sync.core.configuration.ConfigurationService;
 import it.anyplace.sync.core.beans.DeviceAddress;
+import it.anyplace.sync.core.events.DeviceAddressReceivedEvent;
 import it.anyplace.sync.core.interfaces.DeviceAddressRepository;
 import it.anyplace.sync.core.utils.ExecutorUtils;
 import it.anyplace.sync.discovery.protocol.gd.GlobalDiscoveryHandler;
@@ -30,6 +32,7 @@ import java.io.Closeable;
 import java.util.Collections;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import org.apache.commons.lang3.tuple.Pair;
@@ -43,15 +46,16 @@ import org.slf4j.LoggerFactory;
 public class DiscoveryHandler implements Closeable {
 
     private final Logger logger = LoggerFactory.getLogger(getClass());
-    private final Configuration configuration;
+    private final ConfigurationService configuration;
     private final GlobalDiscoveryHandler globalDiscoveryHandler;
     private final LocalDiscorveryHandler localDiscorveryHandler;
     private final DeviceAddressRepository deviceAddressRepository;
     private final EventBus eventBus = new EventBus();
     private final ExecutorService executorService = Executors.newCachedThreadPool();
     private final Map<Pair<String, String>, DeviceAddress> deviceAddressMap = Collections.synchronizedMap(Maps.<Pair<String, String>, DeviceAddress>newHashMap());
+    private boolean isClosed = false;
 
-    public DiscoveryHandler(Configuration configuration, DeviceAddressRepository deviceAddressRepository) {
+    public DiscoveryHandler(ConfigurationService configuration, DeviceAddressRepository deviceAddressRepository) {
         logger.info("init");
         this.configuration = configuration;
         this.deviceAddressRepository = deviceAddressRepository;
@@ -95,7 +99,7 @@ public class DiscoveryHandler implements Closeable {
                 @Override
                 public void run() {
                     try {
-                        for (String deviceId : DiscoveryHandler.this.configuration.getPeers()) {
+                        for (String deviceId : DiscoveryHandler.this.configuration.getPeerIds()) {
                             List<DeviceAddress> list = globalDiscoveryHandler.query(deviceId);
                             logger.info("received device address list from global discovery");
                             processDeviceAddressBg(list);
@@ -110,27 +114,32 @@ public class DiscoveryHandler implements Closeable {
     }
 
     private void processDeviceAddressBg(final Iterable<DeviceAddress> deviceAddresses) {
-        executorService.submit(new Runnable() {
-            @Override
-            public void run() {
-                try {
-                    logger.info("processing device address list");
-                    List<DeviceAddress> list = Lists.newArrayList(deviceAddresses);
-                    Iterables.removeIf(list, new Predicate<DeviceAddress>() { //do not process address already processed
-                        @Override
-                        public boolean apply(DeviceAddress deviceAddress) {
-                            return deviceAddressMap.containsKey(Pair.of(deviceAddress.getDeviceId(), deviceAddress.getAddress()));
+        if (isClosed) {
+            logger.debug("discarding device addresses, discovery handler already closed");
+        } else {
+            executorService.submit(new Runnable() {
+                @Override
+                public void run() {
+                    try {
+                        logger.info("processing device address list");
+                        List<DeviceAddress> list = Lists.newArrayList(deviceAddresses);
+                        final Set<String> peers = Sets.newHashSet(configuration.getPeerIds());
+                        Iterables.removeIf(list, new Predicate<DeviceAddress>() { //do not process address already processed
+                            @Override
+                            public boolean apply(DeviceAddress deviceAddress) {
+                                return !peers.contains(deviceAddress.getDeviceId()) || deviceAddressMap.containsKey(Pair.of(deviceAddress.getDeviceId(), deviceAddress.getAddress()));
+                            }
+                        });
+                        list = AddressRanker.testAndRank(list);
+                        for (DeviceAddress deviceAddress : list) {
+                            putDeviceAddress(deviceAddress);
                         }
-                    });
-                    list = AddressRanker.testAndRank(list);
-                    for (DeviceAddress deviceAddress : list) {
-                        putDeviceAddress(deviceAddress);
+                    } catch (Exception ex) {
+                        logger.error("error processing device addresses", ex);
                     }
-                } catch (Exception ex) {
-                    logger.error("error processing device addresses", ex);
                 }
-            }
-        });
+            });
+        }
     }
 
     private void putDeviceAddress(final DeviceAddress deviceAddress) {
@@ -166,19 +175,27 @@ public class DiscoveryHandler implements Closeable {
 
     @Override
     public void close() {
-        if (localDiscorveryHandler != null) {
-            localDiscorveryHandler.close();
+        if (!isClosed) {
+            isClosed = true;
+            if (localDiscorveryHandler != null) {
+                localDiscorveryHandler.close();
+            }
+            if (globalDiscoveryHandler != null) {
+                globalDiscoveryHandler.close();
+            }
+            executorService.shutdown();
+            ExecutorUtils.awaitTerminationSafe(executorService);
         }
-        if (globalDiscoveryHandler != null) {
-            globalDiscoveryHandler.close();
-        }
-        executorService.shutdown();
-        ExecutorUtils.awaitTerminationSafe(executorService);
     }
 
-    public abstract class DeviceAddressUpdateEvent {
+    public abstract class DeviceAddressUpdateEvent implements DeviceAddressReceivedEvent {
 
         public abstract DeviceAddress getDeviceAddress();
+
+        @Override
+        public List<DeviceAddress> getDeviceAddresses() {
+            return Collections.singletonList(getDeviceAddress());
+        }
     }
 
 }

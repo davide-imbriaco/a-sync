@@ -21,7 +21,7 @@ import com.google.common.collect.Maps;
 import com.google.common.collect.Sets;
 import com.google.common.eventbus.Subscribe;
 import com.google.protobuf.ByteString;
-import it.anyplace.sync.core.Configuration;
+import it.anyplace.sync.core.configuration.ConfigurationService;
 import it.anyplace.sync.core.beans.BlockInfo;
 import it.anyplace.sync.bep.protos.BlockExchageProtos.ErrorCode;
 import it.anyplace.sync.bep.protos.BlockExchageProtos.Request;
@@ -45,6 +45,7 @@ import it.anyplace.sync.core.cache.BlockCache;
 import java.io.Closeable;
 import java.util.concurrent.atomic.AtomicReference;
 import org.apache.commons.io.FileUtils;
+import static com.google.common.base.Preconditions.checkArgument;
 
 /**
  *
@@ -54,7 +55,7 @@ public class BlockPuller {
 
     private BlockCache blockCache;
     private final Logger logger = LoggerFactory.getLogger(getClass());
-    private final Configuration configuration;
+    private final ConfigurationService configuration;
     private final BlockExchangeConnectionHandler connectionHandler;
     private final Map<String, byte[]> blocksByHash = Maps.newConcurrentMap();
     private final List<String> hashList = Lists.newArrayList();
@@ -62,13 +63,13 @@ public class BlockPuller {
     private final Set<Integer> requestIds = Sets.newConcurrentHashSet();
     private boolean closeConnection = false;
 
-    public BlockPuller(Configuration configuration, BlockExchangeConnectionHandler connectionHandler) {
+    public BlockPuller(ConfigurationService configuration, BlockExchangeConnectionHandler connectionHandler) {
         this.configuration = configuration;
         this.connectionHandler = connectionHandler;
         this.blockCache = BlockCache.getBlockCache(configuration);
     }
 
-    public BlockPuller(Configuration configuration, BlockExchangeConnectionHandler connectionHandler, boolean closeConnection) {
+    public BlockPuller(ConfigurationService configuration, BlockExchangeConnectionHandler connectionHandler, boolean closeConnection) {
         this(configuration, connectionHandler);
         this.closeConnection = closeConnection;
     }

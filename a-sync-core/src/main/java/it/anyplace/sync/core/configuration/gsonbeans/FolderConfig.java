@@ -37,4 +37,9 @@ public class FolderConfig {
         this.label = label;
     }
 
+    @Override
+    public String toString() {
+        return "FolderConfig{" + "folder=" + folder + ", label=" + label + '}';
+    }
+
 }

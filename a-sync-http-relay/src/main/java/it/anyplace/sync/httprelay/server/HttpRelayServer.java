@@ -17,7 +17,7 @@ import com.google.common.base.Strings;
 import com.google.common.collect.Maps;
 import com.google.common.eventbus.Subscribe;
 import com.google.protobuf.ByteString;
-import it.anyplace.sync.core.Configuration;
+import it.anyplace.sync.core.configuration.ConfigurationService;
 import it.anyplace.sync.httprelay.server.RelaySessionConnection.ConnectionClosedEvent;
 import it.anyplace.sync.httprelay.protos.HttpRelayProtos;
 import java.io.IOException;
@@ -38,29 +38,31 @@ import it.anyplace.sync.core.security.KeystoreHandler;
 import it.anyplace.sync.core.interfaces.RelayConnection;
 import java.io.File;
 import static com.google.common.base.Preconditions.checkNotNull;
+import java.io.Closeable;
+import org.apache.commons.io.IOUtils;
 
 /**
  *
  * @author aleph
  */
-public class HttpRelayServer {
+public class HttpRelayServer implements Closeable {
 
     private final Logger logger = LoggerFactory.getLogger(getClass());
     private final InetSocketAddress relayServerAddress;
     private Server server;
     private final static long MAX_WAIT_FOR_DATA_SECS = 30;
-    private Configuration configuration;
+    private ConfigurationService configuration;
     private final KeystoreHandler keystoreHandler;
 
     public HttpRelayServer(InetSocketAddress relayServerAddress) {
         this.relayServerAddress = relayServerAddress;
         try {
-            this.configuration = new Configuration(new File(System.getProperty("user.home"), ".config/a-sync-http-relay.properties"));
-        } catch (IOException ex) {
+            this.configuration = ConfigurationService.newLoader().loadFrom(new File(System.getProperty("user.home"), ".config/a-sync-http-relay.properties"));
+        } catch (Exception ex) {
             logger.warn("error loading config", ex);
-            this.configuration = new Configuration();
+            this.configuration = ConfigurationService.newLoader().load();
         }
-        keystoreHandler = new KeystoreHandler(configuration);
+        keystoreHandler = KeystoreHandler.newLoader().loadAndStore(configuration);
     }
 
     private final Map<String, RelaySessionConnection> relayConnectionsBySessionId = Maps.newConcurrentMap();
@@ -171,6 +173,16 @@ public class HttpRelayServer {
 
     public void join() throws InterruptedException {
         server.join();
+    }
+
+    @Override
+    public void close() {
+        try {
+            server.stop();
+        } catch (Exception ex) {
+            logger.warn("error stopping server", ex);
+        }
+        IOUtils.closeQuietly(configuration);
     }
 
 }

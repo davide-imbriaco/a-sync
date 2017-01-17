@@ -30,7 +30,7 @@ import it.anyplace.sync.core.beans.BlockInfo;
 import java.util.Collections;
 import javax.annotation.Nullable;
 import it.anyplace.sync.core.beans.FileInfo.Version;
-import it.anyplace.sync.core.Configuration;
+import it.anyplace.sync.core.configuration.ConfigurationService;
 import it.anyplace.sync.bep.BlockExchangeConnectionHandler.AnyIndexMessageReceivedEvent;
 import java.io.IOException;
 import org.apache.commons.io.FileUtils;
@@ -55,9 +55,10 @@ import static it.anyplace.sync.core.security.KeystoreHandler.hashDataToDeviceIdS
 import java.io.Closeable;
 import org.apache.commons.lang3.tuple.Pair;
 import it.anyplace.sync.core.beans.FileBlocks;
+import it.anyplace.sync.core.interfaces.IndexRepository;
+import it.anyplace.sync.core.utils.ExecutorUtils;
 import static com.google.common.base.Preconditions.checkArgument;
 import static com.google.common.base.Preconditions.checkNotNull;
-import it.anyplace.sync.core.interfaces.IndexRepository;
 
 /**
  *
@@ -67,12 +68,13 @@ public class IndexHandler implements Closeable {
 
     private final static long DEFAULT_INDEX_TIMEOUT = 30;
     private final Logger logger = LoggerFactory.getLogger(getClass());
-    private final Configuration configuration;
+    private final ConfigurationService configuration;
     private final EventBus eventBus = new EventBus();
     private final Map<String, FolderInfo> folderInfoByFolder = Maps.newHashMap();
     private final IndexRepository indexRepository;
     private final IndexMessageProcessor indexMessageProcessor = new IndexMessageProcessor();
     private long lastIndexActivity = 0;
+    private final Object writeAccessLock = new Object(), indexWaitLock = new Object();
 
     private long getLastActive() {
         return System.currentTimeMillis() - lastIndexActivity;
@@ -82,15 +84,17 @@ public class IndexHandler implements Closeable {
         lastIndexActivity = System.currentTimeMillis();
     }
 
-    public IndexHandler(Configuration configuration,  IndexRepository indexRepository) {
+    public IndexHandler(ConfigurationService configuration, IndexRepository indexRepository) {
         this.configuration = configuration;
         loadFolderInfoFromConfig();
         this.indexRepository = indexRepository;
     }
 
-    private synchronized void loadFolderInfoFromConfig() {
-        for (FolderInfo folderInfo : configuration.getFolders()) {
-            folderInfoByFolder.put(folderInfo.getFolder(), folderInfo); //TODO reference 'folder info' repository
+    private void loadFolderInfoFromConfig() {
+        synchronized (writeAccessLock) {
+            for (FolderInfo folderInfo : configuration.getFolders()) {
+                folderInfoByFolder.put(folderInfo.getFolder(), folderInfo); //TODO reference 'folder info' repository
+            }
         }
     }
 
@@ -99,13 +103,14 @@ public class IndexHandler implements Closeable {
     }
 
     public synchronized void clearIndex() {
-        indexRepository.clearIndex();
-        folderInfoByFolder.clear();
-        loadFolderInfoFromConfig();
-//        storeIndexToConfigSafe();
+        synchronized (writeAccessLock) {
+            indexRepository.clearIndex();
+            folderInfoByFolder.clear();
+            loadFolderInfoFromConfig();
+        }
     }
 
-    public synchronized boolean isRemoteIndexAquired(BlockExchangeConnectionHandler connectionHandler) {
+    public boolean isRemoteIndexAquired(BlockExchangeConnectionHandler connectionHandler) {
         boolean ready = true;
         for (String folder : connectionHandler.getClusterConfigInfo().getSharedFolders()) {
             IndexInfo indexSequenceInfo = indexRepository.findIndexInfoByDeviceAndFolder(connectionHandler.getDeviceId(), folder);
@@ -117,32 +122,36 @@ public class IndexHandler implements Closeable {
         return ready;
     }
 
-    public synchronized IndexHandler waitForRemoteIndexAquired(BlockExchangeConnectionHandler connectionHandler) throws InterruptedException {
+    public IndexHandler waitForRemoteIndexAquired(BlockExchangeConnectionHandler connectionHandler) throws InterruptedException {
         return waitForRemoteIndexAquired(connectionHandler, null);
     }
 
-    public synchronized IndexHandler waitForRemoteIndexAquired(BlockExchangeConnectionHandler connectionHandler, @Nullable Long timeoutSecs) throws InterruptedException {
+    public IndexHandler waitForRemoteIndexAquired(BlockExchangeConnectionHandler connectionHandler, @Nullable Long timeoutSecs) throws InterruptedException {
         long timeoutMillis = firstNonNull(timeoutSecs, DEFAULT_INDEX_TIMEOUT) * 1000;
-        while (!isRemoteIndexAquired(connectionHandler)) {
-            wait(timeoutMillis);
-            checkArgument(connectionHandler.getLastActive() < timeoutMillis
-                || getLastActive() < timeoutMillis, "unable to aquire index from connection %s, timeout reached!", connectionHandler);
+        synchronized (indexWaitLock) {
+            while (!isRemoteIndexAquired(connectionHandler)) {
+                indexWaitLock.wait(timeoutMillis);
+                checkArgument(connectionHandler.getLastActive() < timeoutMillis
+                    || getLastActive() < timeoutMillis, "unable to aquire index from connection %s, timeout reached!", connectionHandler);
+            }
         }
         logger.debug("aquired all indexes on connection {}", connectionHandler);
         return this;
     }
 
     @Subscribe
-    public synchronized void handleClusterConfigMessageProcessedEvent(ClusterConfigMessageProcessedEvent event) {
-        for (BlockExchageProtos.Folder folderRecord : event.getMessage().getFoldersList()) {
-            String folder = folderRecord.getId();
-            FolderInfo folderInfo = updateFolderInfo(folder, folderRecord.getLabel());
-            logger.debug("aquired folder info from cluster config = {}", folderInfo);
-            for (BlockExchageProtos.Device deviceRecord : folderRecord.getDevicesList()) {
-                String deviceId = hashDataToDeviceIdString(deviceRecord.getId().toByteArray());
-                if (deviceRecord.hasIndexId() && deviceRecord.hasMaxSequence()) {
-                    IndexInfo folderIndexInfo = updateIndexInfo(folder, deviceId, deviceRecord.getIndexId(), deviceRecord.getMaxSequence(), null);
-                    logger.debug("aquired folder index info from cluster config = {}", folderIndexInfo);
+    public void handleClusterConfigMessageProcessedEvent(ClusterConfigMessageProcessedEvent event) {
+        synchronized (writeAccessLock) {
+            for (BlockExchageProtos.Folder folderRecord : event.getMessage().getFoldersList()) {
+                String folder = folderRecord.getId();
+                FolderInfo folderInfo = updateFolderInfo(folder, folderRecord.getLabel());
+                logger.debug("aquired folder info from cluster config = {}", folderInfo);
+                for (BlockExchageProtos.Device deviceRecord : folderRecord.getDevicesList()) {
+                    String deviceId = hashDataToDeviceIdString(deviceRecord.getId().toByteArray());
+                    if (deviceRecord.hasIndexId() && deviceRecord.hasMaxSequence()) {
+                        IndexInfo folderIndexInfo = updateIndexInfo(folder, deviceId, deviceRecord.getIndexId(), deviceRecord.getMaxSequence(), null);
+                        logger.debug("aquired folder index info from cluster config = {}", folderIndexInfo);
+                    }
                 }
             }
         }
@@ -153,7 +162,7 @@ public class IndexHandler implements Closeable {
         indexMessageProcessor.handleIndexMessageReceivedEvent(event);
     }
 
-    public synchronized @Nullable
+    public @Nullable
     FileInfo pushRecord(String folder, BlockExchageProtos.FileInfo bepFileInfo) {
         FileBlocks fileBlocks = null;
         FileInfo.Builder builder = FileInfo.newBuilder()
@@ -190,60 +199,68 @@ public class IndexHandler implements Closeable {
         return addRecord(builder.build(), fileBlocks);
     }
 
-    private synchronized IndexInfo updateIndexInfo(final String folder, final String deviceId, @Nullable Long indexId, @Nullable Long maxSequence, @Nullable Long localSequence) {
-        IndexInfo indexSequenceInfo = indexRepository.findIndexInfoByDeviceAndFolder(deviceId, folder);
-        IndexInfo.Builder builder;
-        if (indexSequenceInfo == null) {
-            checkNotNull(indexId, "index sequence info not found, and supplied null index id (folder = %s, device = %s)", folder, deviceId);
-            builder = IndexInfo.newBuilder()
-                .setFolder(folder)
-                .setDeviceId(deviceId)
-                .setIndexId(indexId)
-                .setLocalSequence(0)
-                .setMaxSequence(-1);
-        } else {
-            builder = indexSequenceInfo.copyBuilder();
+    private IndexInfo updateIndexInfo(final String folder, final String deviceId, @Nullable Long indexId, @Nullable Long maxSequence, @Nullable Long localSequence) {
+        synchronized (writeAccessLock) {
+            IndexInfo indexSequenceInfo = indexRepository.findIndexInfoByDeviceAndFolder(deviceId, folder);
+            IndexInfo.Builder builder;
+            if (indexSequenceInfo == null) {
+                checkNotNull(indexId, "index sequence info not found, and supplied null index id (folder = %s, device = %s)", folder, deviceId);
+                builder = IndexInfo.newBuilder()
+                    .setFolder(folder)
+                    .setDeviceId(deviceId)
+                    .setIndexId(indexId)
+                    .setLocalSequence(0)
+                    .setMaxSequence(-1);
+            } else {
+                builder = indexSequenceInfo.copyBuilder();
+            }
+            if (indexId != null) {
+                builder.setIndexId(indexId);
+            }
+            if (maxSequence != null && maxSequence > builder.getMaxSequence()) {
+                builder.setMaxSequence(maxSequence);
+            }
+            if (localSequence != null && localSequence > builder.getLocalSequence()) {
+                builder.setLocalSequence(localSequence);
+            }
+            indexSequenceInfo = builder.build();
+            indexRepository.updateIndexInfo(indexSequenceInfo);
+            return indexSequenceInfo;
         }
-        if (indexId != null) {
-            builder.setIndexId(indexId);
-        }
-        if (maxSequence != null && maxSequence > builder.getMaxSequence()) {
-            builder.setMaxSequence(maxSequence);
-        }
-        if (localSequence != null && localSequence > builder.getLocalSequence()) {
-            builder.setLocalSequence(localSequence);
-        }
-        indexSequenceInfo = builder.build();
-        indexRepository.updateIndexInfo(indexSequenceInfo);
-        return indexSequenceInfo;
     }
 
-    private synchronized @Nullable
+    private @Nullable
     FileInfo addRecord(final FileInfo record, @Nullable final FileBlocks fileBlocks) {
-        Date lastModified = indexRepository.findFileInfoLastModified(record.getFolder(), record.getPath());
-        if (lastModified != null && !record.getLastModified().after(lastModified)) {
-            logger.trace("discarding record = {}, modified before local record", record);
-            return null;
-        } else {
-            indexRepository.updateFileInfo(record, fileBlocks);
-            logger.trace("loaded new record = {}", record);
-            eventBus.post(new IndexChangedEvent() {
-                @Override
-                public String getFolder() {
-                    return record.getFolder();
-                }
+        synchronized (writeAccessLock) {
+            Date lastModified = indexRepository.findFileInfoLastModified(record.getFolder(), record.getPath());
+            if (lastModified != null && !record.getLastModified().after(lastModified)) {
+                logger.trace("discarding record = {}, modified before local record", record);
+                return null;
+            } else {
+                indexRepository.updateFileInfo(record, fileBlocks);
+                logger.trace("loaded new record = {}", record);
+                eventBus.post(new IndexChangedEvent() {
+                    @Override
+                    public String getFolder() {
+                        return record.getFolder();
+                    }
 
-                @Override
-                public List<FileInfo> getNewRecords() {
-                    return Collections.singletonList(record);
-                }
-            });
-            return record;
+                    @Override
+                    public List<FileInfo> getNewRecords() {
+                        return Collections.singletonList(record);
+                    }
+                });
+                return record;
+            }
         }
     }
 
     public IndexBrowser.Builder newIndexBrowserBuilder() {
         return IndexBrowser.newBuilder().setIndexHandler(this).setIndexRepository(indexRepository);
+    }
+
+    public IndexFinder.Builder newIndexFinderBuilder() {
+        return IndexFinder.newBuilder().setIndexRepository(indexRepository);
     }
 
     public @Nullable
@@ -414,80 +431,80 @@ public class IndexHandler implements Closeable {
         }
 
         private void doHandleIndexMessageReceivedEvent(BlockExchageProtos.IndexUpdate message, BlockExchangeConnectionHandler connectionHandler) throws IOException {
-            synchronized (IndexHandler.this) {
-                logger.debug("processing index message event ");
-                String deviceId = connectionHandler.getDeviceId();
-                final String folder = message.getFolder();
-                long sequence = -1;
-                final List<FileInfo> newRecords = Lists.newArrayList();
-                IndexInfo oldIndexInfo = indexRepository.findIndexInfoByDeviceAndFolder(deviceId, folder);
-                Stopwatch stopwatch = Stopwatch.createStarted();
-                logger.debug("processing {} index records for folder {}", message.getFilesList().size(), folder);
-                for (BlockExchageProtos.FileInfo fileInfo : (List<BlockExchageProtos.FileInfo>) message.getFilesList()) {
-                    markActive();
-                    if (oldIndexInfo != null && isVersionOlderThanSequence(fileInfo, oldIndexInfo.getLocalSequence())) {
-                        logger.trace("skipping file {}, version older than sequence {}", fileInfo, oldIndexInfo.getLocalSequence());
-                    } else {
-                        try {
-                            FileInfo newRecord = pushRecord(folder, fileInfo);
-                            if (newRecord != null) {
-                                newRecords.add(newRecord);
-                            }
-                        } catch (Exception ex) {
-                            logger.warn("error processing file record = {}, discarding", fileInfo);
-                            logger.warn("error", ex);
-                        }
-                        sequence = Math.max(fileInfo.getSequence(), sequence);
-                        markActive();
-                    }
-                }
-                final IndexInfo newIndexInfo = updateIndexInfo(folder, deviceId, null, null, sequence);
-                logger.info("processed {} index records, aquired {} ({} secs)", message.getFilesList().size(), newRecords.size(), stopwatch.elapsed(TimeUnit.MILLISECONDS) / 1000d);
-                if (logger.isInfoEnabled() && newRecords.size() <= 10) {
-                    for (FileInfo fileInfo : newRecords) {
-                        logger.info("aquired record = {}", fileInfo);
-                    }
-                }
-                if (!newRecords.isEmpty()) {
-                    eventBus.post(new IndexRecordAquiredEvent() {
-                        @Override
-                        public String getFolder() {
-                            return folder;
-                        }
-
-                        @Override
-                        public List<FileInfo> getNewRecords() {
-                            return newRecords;
-                        }
-
-                        @Override
-                        public IndexInfo getIndexInfo() {
-                            return newIndexInfo;
-                        }
-                    });
-                }
-                logger.debug("index info = {}", newIndexInfo);
-                if (isRemoteIndexAquired(connectionHandler)) {
-                    logger.debug("index aquired");
-                    eventBus.post(new RemoteIndexAquiredEvent() {
-                        @Override
-                        public String getFolder() {
-                            return folder;
-                        }
-                    });
-                }
-                IndexHandler.this.notifyAll();
+//            synchronized (writeAccessLock) {
+            logger.debug("processing index message event ");
+            String deviceId = connectionHandler.getDeviceId();
+            final String folder = message.getFolder();
+            long sequence = -1;
+            final List<FileInfo> newRecords = Lists.newArrayList();
+//                IndexInfo oldIndexInfo = indexRepository.findIndexInfoByDeviceAndFolder(deviceId, folder);
+            Stopwatch stopwatch = Stopwatch.createStarted();
+            logger.debug("processing {} index records for folder {}", message.getFilesList().size(), folder);
+            for (BlockExchageProtos.FileInfo fileInfo : (List<BlockExchageProtos.FileInfo>) message.getFilesList()) {
                 markActive();
+//                    if (oldIndexInfo != null && isVersionOlderThanSequence(fileInfo, oldIndexInfo.getLocalSequence())) {
+//                        logger.trace("skipping file {}, version older than sequence {}", fileInfo, oldIndexInfo.getLocalSequence());
+//                    } else {
+                try {
+                    FileInfo newRecord = pushRecord(folder, fileInfo);
+                    if (newRecord != null) {
+                        newRecords.add(newRecord);
+                    }
+                } catch (Exception ex) {
+                    logger.warn("error processing file record = {}, discarding", fileInfo);
+                    logger.warn("error", ex);
+                }
+                sequence = Math.max(fileInfo.getSequence(), sequence);
+                markActive();
+//                    }
             }
+            final IndexInfo newIndexInfo = updateIndexInfo(folder, deviceId, null, null, sequence);
+            logger.info("processed {} index records, aquired {} ({} secs)", message.getFilesList().size(), newRecords.size(), stopwatch.elapsed(TimeUnit.MILLISECONDS) / 1000d);
+            if (logger.isInfoEnabled() && newRecords.size() <= 10) {
+                for (FileInfo fileInfo : newRecords) {
+                    logger.info("aquired record = {}", fileInfo);
+                }
+            }
+            if (!newRecords.isEmpty()) {
+                eventBus.post(new IndexRecordAquiredEvent() {
+                    @Override
+                    public String getFolder() {
+                        return folder;
+                    }
+
+                    @Override
+                    public List<FileInfo> getNewRecords() {
+                        return newRecords;
+                    }
+
+                    @Override
+                    public IndexInfo getIndexInfo() {
+                        return newIndexInfo;
+                    }
+                });
+            }
+            logger.debug("index info = {}", newIndexInfo);
+            if (isRemoteIndexAquired(connectionHandler)) {
+                logger.debug("index aquired");
+                eventBus.post(new RemoteIndexAquiredEvent() {
+                    @Override
+                    public String getFolder() {
+                        return folder;
+                    }
+                });
+            }
+//                IndexHandler.this.notifyAll();
+            markActive();
+            synchronized (indexWaitLock) {
+                indexWaitLock.notifyAll();
+            }
+//            }
         }
 
         public void stop() {
             logger.info("stopping index record processor");
             executorService.shutdown();
-            try {
-                executorService.awaitTermination(2, TimeUnit.SECONDS);
-            } catch (InterruptedException ex) {
-            }
+            ExecutorUtils.awaitTerminationSafe(executorService);
         }
 
     }
