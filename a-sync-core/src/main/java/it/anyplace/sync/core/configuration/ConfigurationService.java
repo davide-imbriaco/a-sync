@@ -101,7 +101,7 @@ public class ConfigurationService implements Closeable {
         folders = Collections.synchronizedMap(Maps.<String, FolderInfo>newHashMap());
         String folderValue = properties.getProperty(FOLDERS);
         try {
-            FolderConfigList folderConfigList = gson.fromJson(folderValue, FolderConfigList.class);
+            FolderConfigList folderConfigList = isBlank(folderValue) ? new FolderConfigList() : gson.fromJson(folderValue, FolderConfigList.class);
             for (FolderConfig folderConfig : folderConfigList.getFolders()) {
                 folders.put(folderConfig.getFolder(), new FolderInfo(folderConfig.getFolder(), folderConfig.getLabel()));
             }
@@ -139,7 +139,7 @@ public class ConfigurationService implements Closeable {
         peers = Collections.synchronizedMap(Maps.<String, DeviceInfo>newHashMap());
         String peersValue = properties.getProperty(PEERS);
         try {
-            DeviceConfigList deviceConfigList = gson.fromJson(peersValue, DeviceConfigList.class);
+            DeviceConfigList deviceConfigList = isBlank(peersValue) ? new DeviceConfigList() : gson.fromJson(peersValue, DeviceConfigList.class);
             for (DeviceConfig deviceConfig : deviceConfigList.getDevices()) {
                 peers.put(deviceConfig.getDeviceId(), new DeviceInfo(deviceConfig.getDeviceId(), deviceConfig.getName()));
             }
