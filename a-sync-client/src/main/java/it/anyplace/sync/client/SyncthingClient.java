@@ -66,7 +66,7 @@ public class SyncthingClient implements Closeable {
     public SyncthingClient(ConfigurationService configuration) {
         this.configuration = configuration;
         this.sqlRepository = new SqlRepository(configuration);
-        indexHandler = new IndexHandler(configuration, sqlRepository);
+        indexHandler = new IndexHandler(configuration, sqlRepository, sqlRepository);
         discoveryHandler = new DiscoveryHandler(configuration, sqlRepository);
         devicesHandler = new DevicesHandler(configuration);
         discoveryHandler.getEventBus().register(devicesHandler);

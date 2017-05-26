@@ -38,10 +38,12 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import it.anyplace.sync.core.interfaces.IndexRepository;
 import static it.anyplace.sync.core.utils.FileInfoOrdering.ALPHA_ASC_DIR_FIRST;
-import java.util.concurrent.atomic.AtomicInteger;
 import static com.google.common.base.Preconditions.checkArgument;
 import static com.google.common.base.Preconditions.checkNotNull;
+import com.google.common.collect.Iterables;
+import com.google.common.collect.Sets;
 import java.util.Map;
+import java.util.Set;
 
 /**
  *
@@ -99,7 +101,8 @@ public final class IndexBrowser implements Closeable {
         }
 
     };
-    private final AtomicInteger jobsInQueue = new AtomicInteger(0);
+    private final Set<String> preloadJobs = Sets.newLinkedHashSet();
+    private final Object preloadJobsLock = new Object();
 
     private IndexBrowser(IndexRepository indexRepository, IndexHandler indexHandler, String folder, boolean includeParentInList, boolean allowParentInRoot, Comparator<FileInfo> ordering) {
         checkNotNull(indexRepository);
@@ -141,59 +144,80 @@ public final class IndexBrowser implements Closeable {
     }
 
     private void preloadFileInfoForCurrentPath() {
-        logger.debug("trigger preload");
-        final String preloadPath = currentPath;
-        executorService.submit(new Runnable() {
-            {
-                jobsInQueue.addAndGet(1);
-            }
+        logger.debug("trigger preload for folder = '{}'", folder);
+        synchronized (preloadJobsLock) {
+            if (preloadJobs.contains(currentPath)) {
+                preloadJobs.remove(currentPath);
+                preloadJobs.add(currentPath); ///add last
+                return; // no need to trigger job
+            } else {
+                preloadJobs.add(currentPath);
+                executorService.submit(new Runnable() {
 
-            @Override
-            public void run() {
-                logger.info("folder preload BEGIN for path = '{}'", preloadPath);
-                getFileInfoByAbsolutePath(preloadPath);
-                if (!PathUtils.isRoot(preloadPath)) {
-                    String parent = getParentPath(preloadPath);
-                    getFileInfoByAbsolutePath(parent);
-                    listFiles(parent);
-                }
-                for (FileInfo record : listFiles(preloadPath)) {
-                    if (!equal(record.getPath(), PARENT_FILE_INFO.getPath()) && record.isDirectory()) {
-                        listFiles(record.getPath());
+                    @Override
+                    public void run() {
+
+                        String preloadPath;
+                        synchronized (preloadJobsLock) {
+                            checkArgument(!preloadJobs.isEmpty());
+                            preloadPath = Iterables.getLast(preloadJobs); //pop last job
+                        }
+
+                        logger.info("folder preload BEGIN for folder = '{}' path = '{}'", folder, preloadPath);
+                        getFileInfoByAbsolutePath(preloadPath);
+                        if (!PathUtils.isRoot(preloadPath)) {
+                            String parent = getParentPath(preloadPath);
+                            getFileInfoByAbsolutePath(parent);
+                            listFiles(parent);
+                        }
+                        for (FileInfo record : listFiles(preloadPath)) {
+                            if (!equal(record.getPath(), PARENT_FILE_INFO.getPath()) && record.isDirectory()) {
+                                listFiles(record.getPath());
+                            }
+                        }
+                        logger.info("folder preload END for folder = '{}' path = '{}'", folder, preloadPath);
+                        synchronized (preloadJobsLock) {
+                            preloadJobs.remove(preloadPath);
+                            if (isCacheReady()) {
+                                logger.info("cache ready, notify listeners");
+                                preloadJobsLock.notifyAll();
+                            } else {
+                                logger.info("still {} job[s] left in cache loader", preloadJobs.size());
+                                executorService.submit(this);
+                            }
+                        }
                     }
-                }
-                logger.info("folder preload END for path = '{}'", preloadPath);
-                synchronized (jobsInQueue) {
-                    jobsInQueue.addAndGet(-1);
-                    jobsInQueue.notifyAll();
-                }
+
+                });
             }
 
-        });
+        }
     }
 
     public boolean isCacheReady() {
-        return jobsInQueue.get() == 0;
+        synchronized (preloadJobsLock) {
+            return preloadJobs.isEmpty();
+        }
     }
 
     public boolean isCacheReadyAfterALittleWait() {
-        synchronized (jobsInQueue) {
+        synchronized (preloadJobsLock) {
             if (!isCacheReady()) {
                 try {
-                    jobsInQueue.wait(100);
+                    preloadJobsLock.wait(100);
                 } catch (InterruptedException ex) {
                 }
             }
+            return isCacheReady();
         }
-        return isCacheReady();
     }
 
     public IndexBrowser waitForCacheReady() {
         logger.debug("waiting for cache to be ready");
-        synchronized (jobsInQueue) {
+        synchronized (preloadJobsLock) {
             while (!isCacheReady()) {
                 try {
-                    jobsInQueue.wait();
+                    preloadJobsLock.wait();
                 } catch (InterruptedException ex) {
                 }
             }

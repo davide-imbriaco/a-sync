@@ -60,17 +60,22 @@ import it.anyplace.sync.core.interfaces.DeviceAddressRepository;
 import it.anyplace.sync.core.interfaces.IndexRepository;
 import it.anyplace.sync.core.interfaces.IndexRepository.FolderStatsUpdatedEvent;
 import static com.google.common.base.Preconditions.checkArgument;
+import static com.google.common.base.Preconditions.checkNotNull;
+import static com.google.common.base.Strings.emptyToNull;
+import it.anyplace.sync.core.interfaces.TempRepository;
+import java.util.UUID;
+import org.apache.commons.io.FileUtils;
 import static org.apache.http.util.TextUtils.isBlank;
 
 /**
  *
  * @author aleph
  */
-public class SqlRepository implements Closeable, IndexRepository, DeviceAddressRepository {
+public class SqlRepository implements Closeable, IndexRepository, DeviceAddressRepository, TempRepository {
 
     private final Logger logger = LoggerFactory.getLogger(getClass());
     private final ConfigurationService configuration;
-    private final static int VERSION = 12;
+    private final static int VERSION = 13;
     private Sequencer sequencer = new IndexRepoSequencer();
     private final String jdbcUrl;
     private final HikariConfig hikariConfig;
@@ -99,17 +104,29 @@ public class SqlRepository implements Closeable, IndexRepository, DeviceAddressR
     public SqlRepository(ConfigurationService configuration) {
         this.configuration = configuration;
         logger.info("starting sql database");
-        File dbDir = new File(configuration.getDatabase(), "index");
+        File dbDir = new File(configuration.getDatabase(), "h2_index_database");
         dbDir.mkdirs();
         checkArgument(dbDir.isDirectory() && dbDir.canWrite());
-        jdbcUrl = "jdbc:h2:file:" + dbDir.getAbsolutePath() + nullToEmpty(configuration.getRepositoryH2Config());
+        jdbcUrl = "jdbc:h2:file:" + new File(dbDir, "index").getAbsolutePath() + nullToEmpty(configuration.getRepositoryH2Config());
         logger.debug("jdbc url = {}", jdbcUrl);
         hikariConfig = new HikariConfig();
         hikariConfig.setDriverClassName("org.h2.Driver");
         hikariConfig.setJdbcUrl(jdbcUrl);
         hikariConfig.setMinimumIdle(4);
-        dataSource = new HikariDataSource(hikariConfig);
+        HikariDataSource newDataSource;
+        try {
+            newDataSource = new HikariDataSource(hikariConfig);
+        } catch (Exception ex) {
+            logger.error("error loading datasource (we'll try to delete db folder and restart db)", ex);
+            FileUtils.deleteQuietly(dbDir);
+            checkArgument(!dbDir.exists());
+            dbDir.mkdirs();
+            checkArgument(dbDir.isDirectory() && dbDir.canWrite());
+            newDataSource = new HikariDataSource(hikariConfig);
+        }
+        dataSource = newDataSource;
         checkDb();
+        recreateTemporaryTables();
 //        scheduledExecutorService.submit(new Runnable() {
 //            @Override
 //            public void run() {
@@ -244,6 +261,19 @@ public class SqlRepository implements Closeable, IndexRepository, DeviceAddressR
             throw new RuntimeException(ex);
         }
         logger.info("database initialized");
+    }
+
+    private void recreateTemporaryTables() {
+        logger.info("recreateTemporaryTables BEGIN");
+        try (Connection connection = getConnection()) {
+            try (PreparedStatement prepareStatement = connection.prepareStatement("CREATE CACHED TEMPORARY TABLE IF NOT EXISTS temporary_data (record_key VARCHAR NOT NULL PRIMARY KEY,"
+                + "record_data BINARY NOT NULL)")) {
+                prepareStatement.execute();
+            }
+        } catch (SQLException ex) {
+            throw new RuntimeException(ex);
+        }
+        logger.info("recreateTemporaryTables END");
     }
 
     @Override
@@ -702,6 +732,45 @@ public class SqlRepository implements Closeable, IndexRepository, DeviceAddressR
             dataSource.close();
         }
 //        ExecutorUtils.awaitTerminationSafe(scheduledExecutorService);
+    }
+
+    @Override
+    public String pushTempData(byte[] data) {
+        String key = UUID.randomUUID().toString();
+        checkNotNull(data);
+        try (Connection connection = getConnection(); PreparedStatement prepareStatement = connection.prepareStatement("INSERT INTO temporary_data"
+            + " (record_key,record_data)"
+            + " VALUES (?,?)")) {
+            prepareStatement.setString(1, key);
+            prepareStatement.setBytes(2, data);
+            prepareStatement.executeUpdate();
+        } catch (SQLException ex) {
+            throw new RuntimeException(ex);
+        }
+        return key;
+    }
+
+    @Override
+    public byte[] popTempData(String key) {
+        checkNotNull(emptyToNull(key));
+        try (Connection connection = getConnection()) {
+            byte[] data;
+            try (PreparedStatement statement = connection.prepareStatement("SELECT record_data FROM temporary_data WHERE record_key = ?")) {
+                statement.setString(1, key);
+                ResultSet resultSet = statement.executeQuery();
+                checkArgument(resultSet.first());
+                data = resultSet.getBytes(1);
+            }
+            try (PreparedStatement statement = connection.prepareStatement("DELETE FROM temporary_data WHERE record_key = ?")) {
+                statement.setString(1, key);
+                int count = statement.executeUpdate();
+                checkArgument(count == 1);
+            }
+            checkNotNull(data);
+            return data;
+        } catch (SQLException ex) {
+            throw new RuntimeException(ex);
+        }
     }
 
     //SEQUENCER
